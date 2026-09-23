@@ -1,0 +1,45 @@
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Sensitive Credentials (AWS Keys, S3 tokens)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Data & Downloaded Datasets (Không đẩy dataset khổng lồ lên git)
+Project_Data/
+data/
+*.bmp
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Log files & background execution outputs
+*.log
+nohup.out
+
+# IDEs & Code Editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
