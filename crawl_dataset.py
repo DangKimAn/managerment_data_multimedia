@@ -44,11 +44,11 @@ S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", None)
 # ==============================================================================
 # 2. CẤU HÌNH CRAWL DATASET
 # ==============================================================================
-# Số lượng ảnh mục tiêu cho mỗi nhóm (10,000 ảnh/nhóm)
-TARGET_IMAGES_PER_GROUP = 10000
+# Số lượng ảnh mục tiêu cho mỗi nhóm (100 ảnh/nhóm, tổng 4 nhóm = 400 ảnh)
+TARGET_IMAGES_PER_GROUP = int(os.getenv("TARGET_IMAGES_PER_GROUP", 100))
 
-# Số lượng ảnh tối đa cố gắng tải cho mỗi từ khóa (100 - 250 ảnh/keyword)
-MAX_IMAGES_PER_KEYWORD = 200
+# Số lượng ảnh tối đa tải cho mỗi từ khóa (ví dụ: 25 ảnh/từ khóa -> ~4 từ khóa đạt đủ 100 ảnh đa dạng)
+MAX_IMAGES_PER_KEYWORD = int(os.getenv("MAX_IMAGES_PER_KEYWORD", 25))
 
 # Giới hạn cạnh lớn nhất của ảnh (pixel) để tránh file BMP 4K/8K quá nặng khi tải lên S3.
 # Độ phân giải 1280px đảm bảo chất lượng cực cao, sắc nét cho mọi thuật toán nén/xử lý ảnh.
@@ -119,7 +119,6 @@ class S3Storage(BaseStorage):
             self._initialized = True
 
     def write(self, id, data):
-        """Đẩy dữ liệu nhị phân (bytes) từ RAM trực tiếp lên S3"""
         key = f"{self.prefix}/{id}".lstrip("/")
         self.s3.put_object(
             Bucket=self.bucket_name,
@@ -238,7 +237,7 @@ class BmpImageDownloader(ImageDownloader):
 # ==============================================================================
 # 5. HÀM CRAWL TỪNG NHÓM ĐẨY LÊN S3
 # ==============================================================================
-def crawl_images_for_group_s3(group_name, keywords, target_images=10000):
+def crawl_images_for_group_s3(group_name, keywords, target_images=TARGET_IMAGES_PER_GROUP):
     s3_prefix = f"{S3_BASE_PREFIX}/{group_name}".strip("/")
 
     # Khởi tạo S3Storage cho nhóm hiện tại

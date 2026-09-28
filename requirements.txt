@@ -1,3 +1,7 @@
 icrawler
 pillow
 boto3
+beautifulsoup4
+lxml
+numpy
+opencv-python
