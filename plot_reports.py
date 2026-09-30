@@ -16,6 +16,18 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
 
+# Đọc giá trị mặc định từ .env
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for _line in f:
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+
+_DEFAULT_TOTAL_RUNS = int(os.environ.get("TOTAL_RUNS", 5))
+_DEFAULT_RUNS = list(range(1, _DEFAULT_TOTAL_RUNS + 1))
+
 # Set publication-quality style
 sns.set_theme(style="whitegrid", palette="muted")
 plt.rcParams.update({
@@ -86,7 +98,7 @@ def generate_benchmark_charts(
     df_comp_all, df_decomp_all = _load_all_runs(base_input_dir, algo_name, run_ids)
 
     if df_comp_all is None:
-        print(f"[LỖI] Không tìm thấy dữ liệu báo cáo trong '{base_input_dir}/{algo_name}/'")
+        print(f"[ERROR] Cannot find report data in '{base_input_dir}/{algo_name}/'")
         return
 
     df_comp_all["orig_mb"] = df_comp_all["original_bytes"] / (1024 * 1024)
@@ -275,7 +287,7 @@ def generate_benchmark_charts(
         # ----------------------------------------------------------------------
         fig, axes = plt.subplots(1, 2, figsize=(14, 6), dpi=CHART_DPI)
         fig.suptitle(
-            f"[RQ1] Tỷ lệ nén theo loại ảnh — {algo_name.upper()}",
+            f"[RQ1] Compression Ratio by Image Type — {algo_name.upper()}",
             fontsize=14, fontweight="bold"
         )
 
@@ -286,8 +298,8 @@ def generate_benchmark_charts(
 
         bars = axes[0].bar(xlabels, means_by_group, yerr=stds_by_group,
                            capsize=6, color=colors, alpha=0.88, edgecolor="white", linewidth=1.2)
-        axes[0].set_title("Mean Compression Ratio (CR ± std) theo loại ảnh", fontweight="bold")
-        axes[0].set_xlabel("Loại ảnh")
+        axes[0].set_title("Mean Compression Ratio (CR ± std) by Image Type", fontweight="bold")
+        axes[0].set_xlabel("Image Type")
         axes[0].set_ylabel("Compression Ratio (x)")
         for i, (m, s) in enumerate(zip(means_by_group, stds_by_group)):
             axes[0].text(i, m + s + max(means_by_group) * 0.02,
@@ -297,8 +309,8 @@ def generate_benchmark_charts(
         stds_sav  = [df_rq1[df_rq1["image_group"] == g]["space_saving_pct"].std()  for g in group_order]
         axes[1].bar(xlabels, means_sav, yerr=stds_sav,
                     capsize=6, color=colors, alpha=0.88, edgecolor="white", linewidth=1.2)
-        axes[1].set_title("Mean Space Saving (% ± std) theo loại ảnh", fontweight="bold")
-        axes[1].set_xlabel("Loại ảnh")
+        axes[1].set_title("Mean Space Saving (% ± std) by Image Type", fontweight="bold")
+        axes[1].set_xlabel("Image Type")
         axes[1].set_ylabel("Space Saving (%)")
         axes[1].set_ylim(0, 110)
         for i, (m, s) in enumerate(zip(means_sav, stds_sav)):
@@ -321,10 +333,10 @@ def generate_benchmark_charts(
         )
         ax.set_xticklabels([GROUP_LABELS.get(g, g) for g in group_order])
         ax.set_title(
-            f"[RQ1] Phân phối Compression Ratio theo loại ảnh — {algo_name.upper()}",
+            f"[RQ1] Compression Ratio Distribution by Image Type — {algo_name.upper()}",
             fontsize=13, fontweight="bold"
         )
-        ax.set_xlabel("Loại ảnh")
+        ax.set_xlabel("Image Type")
         ax.set_ylabel("Compression Ratio (x)")
 
         # Thêm annotation median trên mỗi box
@@ -368,13 +380,13 @@ def generate_benchmark_charts(
                     pass
 
             ax.set_title(
-                f"[RQ1] Entropy ảnh (Pixel Std Dev) vs Compression Ratio — {algo_name.upper()}\n"
-                "(Std Dev pixel càng cao → ảnh càng nhiễu → entropy cao → CR càng thấp)",
+                f"[RQ1] Image Entropy (Pixel Std Dev) vs Compression Ratio — {algo_name.upper()}\n"
+                "(Higher Std Dev → More Noise → Higher Entropy → Lower CR)",
                 fontsize=12, fontweight="bold"
             )
-            ax.set_xlabel("Pixel Std Dev (proxy entropy Shannon)")
+            ax.set_xlabel("Pixel Std Dev (Shannon Entropy Proxy)")
             ax.set_ylabel("Compression Ratio (x)")
-            ax.legend(title="Loại ảnh", bbox_to_anchor=(1.01, 1), borderaxespad=0)
+            ax.legend(title="Image Type", bbox_to_anchor=(1.01, 1), borderaxespad=0)
             plt.tight_layout()
             p = os.path.join(charts_dir, "10_rq1_scatter_entropy_vs_cr.png")
             fig.savefig(p); plt.close(fig)
@@ -408,13 +420,13 @@ def generate_benchmark_charts(
                         color=GROUP_PALETTE.get(g, "#333"))
 
         ax.set_title(
-            f"[RQ1] Trade-off: Tốc độ nén vs Compression Ratio — {algo_name.upper()}\n"
-            "(★ = centroid trung bình của mỗi nhóm)",
+            f"[RQ1] Trade-off: Compression Speed vs Compression Ratio — {algo_name.upper()}\n"
+            "(★ = Average Centroid of Each Group)",
             fontsize=12, fontweight="bold"
         )
-        ax.set_xlabel("Tốc độ nén (MB/s)")
+        ax.set_xlabel("Compression Speed (MB/s)")
         ax.set_ylabel("Compression Ratio (x)")
-        ax.legend(title="Loại ảnh", bbox_to_anchor=(1.01, 1), borderaxespad=0)
+        ax.legend(title="Image Type", bbox_to_anchor=(1.01, 1), borderaxespad=0)
         plt.tight_layout()
         p = os.path.join(charts_dir, "11_rq1_scatter_speed_vs_cr_by_type.png")
         fig.savefig(p); plt.close(fig)
@@ -439,15 +451,15 @@ def generate_benchmark_charts(
             x = np.arange(len(group_order))
             width = 0.35
             
-            bars1 = ax.bar(x - width/2, comp_speeds, width, label='Tốc độ nén', color='#DD8452', edgecolor="white", linewidth=1.2)
-            bars2 = ax.bar(x + width/2, decomp_speeds, width, label='Tốc độ giải nén', color='#4C72B0', edgecolor="white", linewidth=1.2)
+            bars1 = ax.bar(x - width/2, comp_speeds, width, label='Compress Speed', color='#DD8452', edgecolor="white", linewidth=1.2)
+            bars2 = ax.bar(x + width/2, decomp_speeds, width, label='Decompress Speed', color='#4C72B0', edgecolor="white", linewidth=1.2)
             
-            ax.set_title(f"So sánh Tốc độ Nén và Giải nén theo loại ảnh — {algo_name.upper()}", fontsize=14, fontweight="bold")
-            ax.set_xlabel("Loại ảnh")
-            ax.set_ylabel("Tốc độ xử lý (MB/s)")
+            ax.set_title(f"Compress vs Decompress Speed by Image Type — {algo_name.upper()}", fontsize=14, fontweight="bold")
+            ax.set_xlabel("Image Type")
+            ax.set_ylabel("Processing Speed (MB/s)")
             ax.set_xticks(x)
             ax.set_xticklabels([GROUP_LABELS.get(g, g) for g in group_order])
-            ax.legend(title="Thao tác")
+            ax.legend(title="Action")
             
             # Data labels
             for b in bars1:
@@ -490,16 +502,16 @@ def generate_benchmark_charts(
         df_group_summary = pd.DataFrame(summary_group_rows)
         group_csv = os.path.join(charts_dir, "rq1_summary_by_image_type.csv")
         df_group_summary.to_csv(group_csv, index=False, encoding="utf-8")
-        print(f"[+] Bảng tổng hợp RQ1 đã lưu: {group_csv}")
+        print(f"[+] Saved RQ1 summary table: {group_csv}")
 
     else:
-        print("[THÔNG BÁO] Không tìm thấy dữ liệu phân nhóm (image_group). "
-              "Chạy lại run.py để tạo CSV mới có cột image_group.")
+        print("[WARNING] Cannot find image_group data. "
+              "Run run.py again to create new CSV.")
 
-    print(f"\n[+] Đã tạo {len(generated_paths)} biểu đồ thống kê và lưu vào '{charts_dir}':")
+    print(f"\n[+] Generated {len(generated_paths)} charts and saved to '{charts_dir}':")
     for i, path in enumerate(generated_paths, 1):
         print(f"  {i}. {path}")
-    print(f"\n[+] Bảng thống kê tổng hợp: {os.path.join(charts_dir, 'summary_statistics.csv')}\n")
+    print(f"\n[+] Summary statistics table: {os.path.join(charts_dir, 'summary_statistics.csv')}\n")
 
 
 
@@ -509,8 +521,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--algo", "-a", type=str, default="deflate",
                         help="Algorithm name (default: 'deflate')")
-    parser.add_argument("--runs", "-r", type=int, nargs="+", default=[1],
-                        help="One or more run IDs to include (e.g. --runs 1 2 3 4 5)")
+    parser.add_argument("--runs", "-r", type=int, nargs="+", default=_DEFAULT_RUNS,
+                        help=f"One or more run IDs to include (e.g. --runs 1 2 3 4 5). Default: {_DEFAULT_RUNS}")
     parser.add_argument("--input-dir", "-i", type=str, default="output_not_commit",
                         help="Input directory containing benchmark reports (default: 'output_not_commit')")
     parser.add_argument("--plot-dir", "-p", type=str, default="output",
