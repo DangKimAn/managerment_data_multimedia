@@ -1,5 +1,5 @@
 """
-Deflate Image Compressor Module.
+Deflate Image Compressor Module  (algorithms/deflate/compressor.py)
 Coordinates the whole compression pipeline:
 1. Loads and flattens image pixels (using image_utils)
 2. Applies 2D spatial prediction filtering (using spatial_filters)
@@ -18,19 +18,19 @@ import numpy as np
 from PIL import Image
 
 # Import dedicated modular components
-from .image_utils import (
+from ..common.image_utils import (
     load_image,
     raw_bytes_to_image,
     save_image,
     calculate_image_metrics
 )
-from .spatial_filters import (
+from ..common.spatial_filters import (
     FilterType,
     filter_scanlines,
     unfilter_scanlines
 )
-from .lz77 import lz77_encode, lz77_decode
-from .huffman import huffman_encode, huffman_decode
+from ..common.lz77 import lz77_encode, lz77_decode
+from ..common.huffman import huffman_encode, huffman_decode
 
 # 20-byte fixed header format for .defimg file container
 # Format: Magic (4s) + Version (B) + FilterMode (B) + ColorMode (4s) + Width (I) + Height (I) + Channels (B) + Engine (B)

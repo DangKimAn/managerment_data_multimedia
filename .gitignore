@@ -43,3 +43,4 @@ nohup.out
 # Operating System Files
 .DS_Store
 Thumbs.db
+output_not_commit/

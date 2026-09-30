@@ -1,0 +1,392 @@
+"""
+S3 Image Fetching, Benchmark & Report Generation Module.
+Xử lý từng ảnh một (streaming) để tránh tràn RAM khi số lượng file lớn.
+
+Author: Antigravity AI
+"""
+
+import os
+import csv
+import json
+import time
+import gc
+from io import BytesIO
+from typing import Callable, Dict, List, Optional, Any, Generator, Tuple
+
+import numpy as np
+from PIL import Image
+
+# Import local modules
+from s3_storage import S3Storage
+from algorithms import (
+    DeflateImageCompressor,
+    FilterType,
+    load_image,
+    raw_bytes_to_image,
+    save_image,
+    calculate_image_metrics
+)
+
+# Load environment variables from .env if present
+env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_file):
+    with open(env_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "YOUR_BUCKET_NAME")
+S3_BASE_PREFIX = os.getenv("S3_BASE_PREFIX", "Project_Data")
+AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "YOUR_AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "YOUR_AWS_SECRET_ACCESS_KEY")
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", None)
+
+
+# ==============================================================================
+# 1. S3 FILE STREAMING (GENERATOR) — không load hết vào RAM
+# ==============================================================================
+def stream_s3_images(
+    limit: int = 10,
+    bucket_name: str = S3_BUCKET_NAME,
+    prefix: str = S3_BASE_PREFIX
+) -> Generator[Tuple[str, Image.Image], None, None]:
+    """
+    Generator: Yield từng cặp (filename, PIL Image) một lần, không giữ toàn bộ trong RAM.
+    Nếu S3 chưa cấu hình, tạo ảnh synthetic thay thế.
+
+    Yields:
+        Tuple[str, Image.Image]: (tên file unique, ảnh PIL)
+
+    Ghi chú về tên file:
+        Ảnh từ 4 nhóm khác nhau có thể trùng basename (vd: 000001.bmp).
+        Để tránh ghi đè kết quả, tên file được tạo thành:
+            <group_name>__<basename>  (vd: 1_Natural_Complex__000001.bmp)
+        Nếu key không có sub-folder (chỉ có basename), dùng basename trực tiếp.
+    """
+    count = 0
+
+    # Thử kết nối S3
+    if bucket_name and bucket_name != "YOUR_BUCKET_NAME":
+        try:
+            storage = S3Storage(
+                bucket_name=bucket_name,
+                prefix=prefix,
+                endpoint_url=S3_ENDPOINT_URL,
+                region_name=AWS_REGION,
+                aws_access_key_id=AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+            )
+            storage.sync_existing()
+
+            # Phân loại key theo nhóm và lấy tối đa `limit` ảnh MỖI NHÓM
+            from collections import defaultdict
+            grouped_keys = defaultdict(list)
+            for key in storage._existing_keys:
+                key_stripped = key
+                if prefix and key_stripped.startswith(prefix.rstrip("/") + "/"):
+                    key_stripped = key_stripped[len(prefix.rstrip("/")) + 1:]
+                parts = key_stripped.replace("\\", "/").split("/")
+                group = parts[0] if len(parts) >= 2 else "unknown"
+                grouped_keys[group].append(key)
+
+            keys = []
+            for g in sorted(grouped_keys.keys()):
+                keys.extend(sorted(grouped_keys[g])[:limit])
+
+            for key in keys:
+                img_obj, _, _ = storage.load_data(key)
+                if img_obj is not None:
+                    # Tạo tên file unique: ghép tên sub-folder (nhóm) + basename
+                    # key ví dụ: "Project_Data/1_Natural_Complex/000001.bmp"
+                    # → relative_path = "1_Natural_Complex/000001.bmp"
+                    # → fname = "1_Natural_Complex__000001.bmp"
+                    key_stripped = key
+                    if prefix and key_stripped.startswith(prefix.rstrip("/") + "/"):
+                        key_stripped = key_stripped[len(prefix.rstrip("/")) + 1:]
+                    parts = key_stripped.replace("\\", "/").split("/")
+                    if len(parts) >= 2:
+                        fname = "__".join(parts)  # "1_Natural_Complex__000001.bmp"
+                    else:
+                        fname = parts[-1]          # fallback: basename trực tiếp
+
+                    yield fname, img_obj.convert("RGB")
+                    count += 1
+                    # Giải phóng ngay sau khi yield
+                    del img_obj
+                    gc.collect()
+            return
+        except Exception as e:
+            print(f"[CẢNH BÁO S3] Lỗi khi kết nối S3: {e}. Chuyển sang tạo dữ liệu mẫu...")
+
+    # Fallback: Sinh ảnh synthetic từng cái một
+    print(f"[THÔNG BÁO] Tạo {limit} ảnh thử nghiệm synthetic cho bộ benchmark...")
+    w, h = 400, 400
+    for idx in range(limit):
+        if count >= limit:
+            return
+        file_name = f"sample_{idx+1:02d}.bmp"
+        arr = np.zeros((h, w, 3), dtype=np.uint8)
+        for y in range(h):
+            for x in range(w):
+                r = int(((x + idx * 20) % w) / w * 255)
+                g = int(((y + idx * 30) % h) / h * 255)
+                b = int((x * y) % 256)
+                arr[y, x] = [r, g, b]
+        img = Image.fromarray(arr)
+        yield file_name, img
+        count += 1
+        del arr, img
+        gc.collect()
+
+
+# ==============================================================================
+# 2. XỬ LÝ TỪNG ẢNH MỘT (STREAMING PIPELINE)
+# ==============================================================================
+def _process_single_image(
+    fname: str,
+    img: Image.Image,
+    compress_fn: Callable[[Image.Image], bytes],
+    decompress_fn: Callable[[bytes], Image.Image],
+    num_runs: int,
+    compress_dir: str,
+    images_out_dir: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Nén và giải nén 1 ảnh, trả về dict kết quả cho report.
+    Không giữ dữ liệu lớn trong bộ nhớ sau khi xong.
+    """
+    raw_bytes = img.tobytes()
+    orig_size = len(raw_bytes)
+    del raw_bytes
+
+    # Tính pixel std dev — proxy cho entropy Shannon (nhiễu càng cao → std càng lớn → CR càng thấp)
+    arr_rgb = np.array(img, dtype=np.float32)
+    pixel_std = float(arr_rgb.std())
+
+    # Trích tên nhóm ảnh từ fname (vd: "1_Natural_Complex__000001.bmp" → "1_Natural_Complex")
+    image_group = fname.split("__")[0] if "__" in fname else "unknown"
+
+    # ---- COMPRESS ----
+    comp_times = []
+    comp_bytes = b""
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        comp_bytes = compress_fn(img)
+        t1 = time.perf_counter()
+        comp_times.append(t1 - t0)
+
+    avg_comp = sum(comp_times) / len(comp_times)
+    min_comp = min(comp_times)
+    comp_size = len(comp_bytes)
+    cr = orig_size / comp_size if comp_size > 0 else 0
+    space_saving = (1.0 - comp_size / orig_size) * 100.0 if orig_size > 0 else 0
+    bpp = (comp_size * 8) / (img.width * img.height)
+    comp_speed = (orig_size / (1024 * 1024)) / avg_comp if avg_comp > 0 else 0
+
+    # Ghi file nén xuống đĩa
+    out_fname = f"{os.path.splitext(fname)[0]}.defimg"
+    out_path = os.path.join(compress_dir, out_fname)
+    with open(out_path, "wb") as f:
+        f.write(comp_bytes)
+
+    comp_report = {
+        "filename": fname,
+        "image_group": image_group,
+        "compressed_filename": out_fname,
+        "dimensions": f"{img.width}x{img.height}",
+        "original_bytes": orig_size,
+        "compressed_bytes": comp_size,
+        "compression_ratio": round(cr, 2),
+        "space_saving_pct": round(space_saving, 2),
+        "bits_per_pixel": round(bpp, 2),
+        "avg_compress_time_sec": round(avg_comp, 4),
+        "min_compress_time_sec": round(min_comp, 4),
+        "compress_speed_mb_s": round(comp_speed, 2),
+        "pixel_std": round(pixel_std, 4),
+    }
+
+    # ---- DECOMPRESS ----
+    decomp_times = []
+    restored_img = None
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        restored_img = decompress_fn(comp_bytes)
+        t1 = time.perf_counter()
+        decomp_times.append(t1 - t0)
+
+    # Xả comp_bytes ngay sau khi dùng xong
+    del comp_bytes
+    gc.collect()
+
+    avg_decomp = sum(decomp_times) / len(decomp_times)
+    min_decomp = min(decomp_times)
+    decomp_speed = (orig_size / (1024 * 1024)) / avg_decomp if avg_decomp > 0 else 0
+
+    # Kiểm tra chất lượng lossless
+    is_lossless, mse, psnr_db = calculate_image_metrics(img, restored_img)
+
+    # Ghi ảnh giải nén xuống đĩa
+    out_image_path = os.path.join(images_out_dir, fname)
+    save_image(restored_img, out_image_path)
+
+    # Xả ảnh khôi phục
+    del restored_img
+    gc.collect()
+
+    decomp_report = {
+        "filename": fname,
+        "restored_path": out_image_path,
+        "dimensions": f"{img.width}x{img.height}",
+        "compressed_bytes": comp_size,
+        "restored_bytes": orig_size,
+        "avg_decompress_time_sec": round(avg_decomp, 4),
+        "min_decompress_time_sec": round(min_decomp, 4),
+        "decompress_speed_mb_s": round(decomp_speed, 2),
+        "is_lossless": is_lossless,
+        "mse": round(mse, 4),
+        "psnr_db": "Infinity" if np.isinf(psnr_db) else round(psnr_db, 2),
+    }
+
+    return comp_report, decomp_report
+
+
+# ==============================================================================
+# 3. PIPELINE CHÍNH — XỬ LÝ TỪNG ẢNH, TRÁNH TRÀN RAM
+# ==============================================================================
+def run_s3_benchmark_pipeline(
+    compress_fn: Optional[Callable[[Image.Image], bytes]] = None,
+    decompress_fn: Optional[Callable[[bytes], Image.Image]] = None,
+    algo_name: str = "deflate",
+    run_id: int = 1,
+    num_runs: int = 1,
+    limit_files: int = 10,
+    max_workers: int = 10   # Giữ tham số để tương thích API cũ, không dùng parallel nữa
+):
+    """
+    Pipeline benchmark end-to-end, xử lý TỪNG ẢNH MỘT để tiết kiệm RAM tối đa:
+    1. Fetch 1 ảnh từ S3 / synthetic.
+    2. Compress ảnh đó.
+    3. Decompress ảnh đó.
+    4. Ghi kết quả vào report.
+    5. Xả RAM → sang ảnh tiếp theo.
+
+    Lưu ý: max_workers giữ để tương thích với run.py nhưng pipeline
+    hiện chạy tuần tự để đảm bảo RAM không bị tràn.
+    """
+    # Default compressor nếu không truyền vào
+    if compress_fn is None or decompress_fn is None:
+        compressor = DeflateImageCompressor(compression_level=9, filter_type=FilterType.ADAPTIVE)
+        if compress_fn is None:
+            compress_fn = compressor.compress
+        if decompress_fn is None:
+            decompress_fn = compressor.decompress
+
+    # Chuẩn bị thư mục output
+    base_output_dir = "output_not_commit"
+    compress_dir = os.path.join(base_output_dir, algo_name, str(run_id), "compress", "files")
+    images_out_dir = os.path.join(base_output_dir, algo_name, str(run_id), "compress", "images")
+    report_dir = os.path.join(base_output_dir, algo_name, str(run_id), "compress", "report")
+    os.makedirs(compress_dir, exist_ok=True)
+    os.makedirs(images_out_dir, exist_ok=True)
+    os.makedirs(report_dir, exist_ok=True)
+
+    print(f"\n{'='*80}")
+    print(f"========== BẮT ĐẦU BENCHMARK (STREAMING - TỪNG ẢNH MỘT) ==========")
+    print(f"Thuật toán: {algo_name} | Lần chạy #: {run_id} | Giới hạn: {limit_files} ảnh | Lặp: {num_runs} lần")
+    print(f"Lưu file nén:     {compress_dir}")
+    print(f"Lưu ảnh giải nén: {images_out_dir}")
+    print(f"Lưu report:       {report_dir}")
+    print(f"{'='*80}")
+
+    comp_reports: List[Dict[str, Any]] = []
+    decomp_reports: List[Dict[str, Any]] = []
+
+    total_fetched = 0
+
+    # *** VÒNG LẶP CHÍNH: fetch → compress → decompress → xả RAM → tiếp ***
+    for fname, img in stream_s3_images(limit=limit_files):
+        total_fetched += 1
+        print(f"  [{total_fetched:>4}/{limit_files}] Đang xử lý: {fname} ({img.width}x{img.height})", end="", flush=True)
+
+        try:
+            comp_report, decomp_report = _process_single_image(
+                fname=fname,
+                img=img,
+                compress_fn=compress_fn,
+                decompress_fn=decompress_fn,
+                num_runs=num_runs,
+                compress_dir=compress_dir,
+                images_out_dir=images_out_dir,
+            )
+            comp_reports.append(comp_report)
+            decomp_reports.append(decomp_report)
+
+            cr = comp_report["compression_ratio"]
+            saving = comp_report["space_saving_pct"]
+            lossless = "✓" if decomp_report["is_lossless"] else "✗"
+            print(f" | CR={cr:.2f}x | Tiết kiệm={saving:.1f}% | Lossless={lossless}")
+
+        except Exception as e:
+            print(f" | ❌ LỖI: {e}")
+
+        finally:
+            # Xả ảnh gốc khỏi RAM ngay sau mỗi ảnh
+            del img
+            gc.collect()
+
+    if not comp_reports:
+        print("[CẢNH BÁO] Không có ảnh nào được xử lý!")
+        return
+
+    # Sắp xếp report theo tên file
+    comp_reports.sort(key=lambda x: x["filename"])
+    decomp_reports.sort(key=lambda x: x["filename"])
+
+    # Ghi CSV + JSON báo cáo nén
+    csv_comp = os.path.join(report_dir, "compression_report.csv")
+    with open(csv_comp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(comp_reports[0].keys()))
+        writer.writeheader()
+        writer.writerows(comp_reports)
+
+    json_comp = os.path.join(report_dir, "compression_report.json")
+    with open(json_comp, "w", encoding="utf-8") as f:
+        json.dump(comp_reports, f, indent=2, ensure_ascii=False)
+
+    # Ghi CSV + JSON báo cáo giải nén
+    csv_decomp = os.path.join(report_dir, "decompression_report.csv")
+    with open(csv_decomp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(decomp_reports[0].keys()))
+        writer.writeheader()
+        writer.writerows(decomp_reports)
+
+    json_decomp = os.path.join(report_dir, "decompression_report.json")
+    with open(json_decomp, "w", encoding="utf-8") as f:
+        json.dump(decomp_reports, f, indent=2, ensure_ascii=False)
+
+    # Tóm tắt kết quả
+    avg_cr = sum(r["compression_ratio"] for r in comp_reports) / len(comp_reports)
+    avg_saving = sum(r["space_saving_pct"] for r in comp_reports) / len(comp_reports)
+    lossless_count = sum(1 for r in decomp_reports if r["is_lossless"])
+
+    print(f"\n{'='*80}")
+    print(f"HOÀN THÀNH TOÀN BỘ QUY TRÌNH BENCHMARK CHO THUẬT TOÁN [{algo_name.upper()}]")
+    print(f"  Tổng ảnh đã xử lý:  {total_fetched}")
+    print(f"  CR trung bình:       {avg_cr:.2f}x")
+    print(f"  Tiết kiệm TB:        {avg_saving:.1f}%")
+    print(f"  Lossless:            {lossless_count}/{total_fetched}")
+    print(f"  Báo cáo nén:         {csv_comp}")
+    print(f"  Báo cáo giải nén:    {csv_decomp}")
+    print(f"{'='*80}\n")
+
+
+if __name__ == '__main__':
+    run_s3_benchmark_pipeline(
+        algo_name="deflate",
+        run_id=1,
+        num_runs=1,
+        limit_files=10,
+    )

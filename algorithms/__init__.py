@@ -1,43 +1,47 @@
 """
+algorithms/__init__.py
 Multimedia Image Compression Algorithms Package.
-Modular structure:
-- image_utils: Image loading, flattening, reconstruction, and metric calculation.
-- spatial_filters: PNG-style spatial prediction filters (Sub, Up, Average, Paeth, Adaptive).
-- lz77: Standalone LZ77 sliding window dictionary compression and decompression.
-- huffman: Standalone Huffman tree, bitstream encoding, and decoding.
-- deflate_compressor: Combines all modules into the full DEFLATE image compression pipeline.
+
+Cấu trúc thư mục:
+  algorithms/
+  ├── common/               ← Module dùng chung cho mọi codec
+  │   ├── image_utils.py    ← Load, flatten, reconstruct, compare ảnh
+  │   ├── spatial_filters.py← Bộ lọc dự đoán không gian PNG
+  │   ├── lz77.py           ← LZ77 sliding window compression
+  │   └── huffman.py        ← Huffman entropy coding
+  └── deflate/              ← Thuật toán DEFLATE Image Compression
+      ├── compressor.py     ← Pipeline nén/giải nén hoàn chỉnh
+      ├── demo.py
+      └── README.md
 """
 
-from .image_utils import (
+from .deflate import (
+    # Image utilities
     load_image,
     raw_bytes_to_image,
     save_image,
-    calculate_image_metrics
-)
-from .spatial_filters import (
+    calculate_image_metrics,
+    # Spatial filters
     FilterType,
     paeth_predictor,
     filter_scanlines,
-    unfilter_scanlines
-)
-from .lz77 import (
+    unfilter_scanlines,
+    # LZ77 (từ common, re-export qua deflate)
     lz77_compress,
     lz77_decompress,
     lz77_encode,
-    lz77_decode
-)
-from .huffman import (
+    lz77_decode,
+    # Huffman (từ common, re-export qua deflate)
     HuffmanNode,
     build_huffman_tree,
     build_codes,
     huffman_encode,
-    huffman_decode
-)
-from .deflate_compressor import (
+    huffman_decode,
+    # Deflate Compressor
     DeflateImageCompressor,
     compress_image_deflate,
     decompress_image_deflate,
-    benchmark_image_compression
+    benchmark_image_compression,
 )
 
 __all__ = [
@@ -66,5 +70,5 @@ __all__ = [
     "DeflateImageCompressor",
     "compress_image_deflate",
     "decompress_image_deflate",
-    "benchmark_image_compression"
+    "benchmark_image_compression",
 ]

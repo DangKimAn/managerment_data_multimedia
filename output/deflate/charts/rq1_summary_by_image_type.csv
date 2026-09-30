@@ -1,0 +1,5 @@
+image_group,n_images,cr_mean,cr_median,cr_std,space_saving_mean_pct,bpp_mean,compress_speed_mean_mb_s,avg_compress_time_sec,decompress_speed_mean_mb_s,avg_decompress_time_sec
+1_Natural_Complex,50,2.18,2.02,0.537,51.78,11.572,2.98,1.2046,0.83,3.6665
+2_Flat_Graphics,50,12.89,7.49,13.795,83.12,4.053,6.01,0.3925,1.29,1.9346
+3_Textures_Noisy,50,1.628,1.6,0.232,37.43,15.019,5.42,0.6602,3.82,3.0668
+4_Documents_Text,50,8.18,5.06,9.215,77.95,5.292,4.34,0.6736,1.13,2.5437

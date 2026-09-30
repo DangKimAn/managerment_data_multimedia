@@ -174,3 +174,46 @@ print(f"Compression Ratio (CR): {metrics['adaptive_cr']:.2f}x")
 print(f"Space Saved: {metrics['space_saving_pct']:.2f}%")
 print(f"Lossless check: {metrics['is_lossless']}")
 ```
+
+---
+
+## 6. Biểu đồ phân tích (plot_reports.py)
+
+Chạy sau khi có kết quả benchmark để sinh toàn bộ biểu đồ:
+
+```bash
+python plot_reports.py --algo deflate --runs 1 2 3 4 5
+```
+
+### Danh sách biểu đồ được sinh ra
+
+| File | Mô tả | Phục vụ |
+|------|--------|---------|
+| `2_distribution_compression_ratio.png` | Histogram + KDE phân phối CR | Tổng quan |
+| `3_distribution_processing_time.png` | KDE thời gian nén/giải nén | Tổng quan |
+| `4_boxplot_cr_space_saving.png` | Box plot CR & Space Saving | Tổng quan |
+| `5_scatter_size_vs_cr.png` | Scatter kích thước file vs CR | Tổng quan |
+| `6_boxplot_speed.png` | Box plot tốc độ nén/giải nén | Tổng quan |
+| `8_rq1_cr_by_image_type.png` | **[RQ1]** Grouped bar CR & Space Saving theo loại ảnh | **RQ1** |
+| `9_rq1_boxplot_cr_by_type.png` | **[RQ1]** Box plot phân phối CR theo loại ảnh | **RQ1** |
+| `10_rq1_scatter_entropy_vs_cr.png` | **[RQ1]** Scatter entropy (pixel std) vs CR | **RQ1** |
+| `11_rq1_scatter_speed_vs_cr_by_type.png` | **[RQ1]** Trade-off tốc độ nén vs CR theo loại ảnh | **RQ1** |
+| `12_rq1_grouped_bar_speed.png` | **[RQ1]** Grouped bar tốc độ nén vs giải nén theo loại ảnh | **RQ1** |
+| `rq1_summary_by_image_type.csv` | **[RQ1]** Bảng số liệu tổng hợp cho Chương 5.1 | **RQ1** |
+
+---
+
+## ⚠️ TODO: RQ2 — Còn thiếu, chưa triển khai
+
+> **RQ2:** *"So sánh trực tiếp hiệu quả nén giữa DEFLATE, LZW và WebP trên cùng bộ dữ liệu ảnh?"*
+
+Hiện tại toàn bộ code và biểu đồ chỉ phân tích **DEFLATE** đơn lẻ.
+Để trả lời RQ2 cần bổ sung:
+
+- [ ] Triển khai thuật toán **LZW** (hoặc wrapper) tương tự `algorithms/deflate/`
+- [ ] Triển khai thuật toán **WebP** (dùng `Pillow` hoặc `libwebp`)
+- [ ] Chạy `run.py` cho cả 3 thuật toán, lưu kết quả vào `output_not_commit/lzw/` và `output_not_commit/webp/`
+- [ ] Thêm vào `plot_reports.py`:
+  - Grouped bar: CR trung bình của 3 thuật toán × 4 loại ảnh (biểu đồ tổng hợp chính)
+  - Scatter trade-off: tốc độ vs CR, mỗi điểm = 1 thuật toán (centroid)
+  - Bảng so sánh tổng hợp: CR, BPP, tốc độ theo (thuật toán × loại ảnh) cho Chương 5

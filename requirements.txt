@@ -1,7 +1,23 @@
-icrawler
-pillow
-boto3
-beautifulsoup4
-lxml
-numpy
-opencv-python
+# ============================================================
+# Requirements — Multimedia Data Management & Compression
+# ============================================================
+
+# --- Xử lý ảnh ---
+Pillow>=12.3.0
+
+# --- Tính toán số học / mảng ---
+numpy>=2.5.3
+
+# --- AWS S3 Storage ---
+boto3>=1.43.0
+botocore>=1.43.0
+
+# --- Crawl dataset ảnh ---
+icrawler>=0.6.10
+
+# --- Phân tích & báo cáo dữ liệu ---
+pandas>=3.0.6
+
+# --- Vẽ biểu đồ / báo cáo trực quan ---
+matplotlib>=3.11.2
+seaborn>=0.13.2
