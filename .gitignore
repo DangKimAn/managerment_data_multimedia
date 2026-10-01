@@ -24,7 +24,7 @@ data/
 *.bmp
 *.jpg
 *.jpeg
-*.png
+# *.png
 *.webp
 
 # Log files & background execution outputs
