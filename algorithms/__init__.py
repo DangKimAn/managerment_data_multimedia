@@ -9,10 +9,14 @@ Cấu trúc thư mục:
   │   ├── spatial_filters.py← Bộ lọc dự đoán không gian PNG
   │   ├── lz77.py           ← LZ77 sliding window compression
   │   └── huffman.py        ← Huffman entropy coding
-  └── deflate/              ← Thuật toán DEFLATE Image Compression
-      ├── compressor.py     ← Pipeline nén/giải nén hoàn chỉnh
-      ├── demo.py
-      └── README.md
+  ├── deflate/              ← Thuật toán DEFLATE Image Compression
+  │   ├── compressor.py     ← Pipeline nén/giải nén hoàn chỉnh
+  │   ├── demo.py
+  │   └── README.md
+  └── webp_lossless/        ← Thuật toán WebP Lossless Image Compression
+      ├── compressor.py     ← Pipeline nén WebP lossless (LZ77 + Huffman + RIFF/VP8L)
+      ├── decompressor.py   ← Pipeline giải nén WebP lossless
+      └── __init__.py
 """
 
 from .deflate import (
@@ -44,6 +48,19 @@ from .deflate import (
     benchmark_image_compression,
 )
 
+from .webp_lossless import (
+    # WebP Lossless Compressor
+    WebPLosslessCompressor,
+    compress_image_webp_lossless,
+    benchmark_webp_lossless,
+    # WebP Lossless Decompressor
+    WebPLosslessDecompressor,
+    decompress_image_webp_lossless,
+    # WebP Lossless Transforms
+    apply_subtract_green,
+    inverse_subtract_green,
+)
+
 __all__ = [
     # Image utilities
     "load_image",
@@ -71,4 +88,14 @@ __all__ = [
     "compress_image_deflate",
     "decompress_image_deflate",
     "benchmark_image_compression",
+    # WebP Lossless Compressor
+    "WebPLosslessCompressor",
+    "compress_image_webp_lossless",
+    "benchmark_webp_lossless",
+    # WebP Lossless Decompressor
+    "WebPLosslessDecompressor",
+    "decompress_image_webp_lossless",
+    # WebP Lossless Transforms
+    "apply_subtract_green",
+    "inverse_subtract_green",
 ]
