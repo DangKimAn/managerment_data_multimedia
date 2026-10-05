@@ -1,0 +1,13 @@
+algorithm,image_group,images,original_bytes_mean,compressed_bytes_mean,compression_ratio_mean,space_saving_mean_pct,bits_per_pixel_mean,compress_time_mean_sec,decompress_time_mean_sec,mse_mean,pixel_std_mean,lossless_rate_pct
+deflate,1_Natural_Complex,2,3096960.0,1321206.5,2.66,58.26,10.015,2.3587,2.4616,0.0,67.53285,100.0
+deflate,2_Flat_Graphics,2,4033537.5,511928.5,8.385,87.745,2.94,0.65505,2.7557,0.0,53.8942,100.0
+deflate,3_Textures_Noisy,2,3871104.0,2759290.0,1.445,30.07,16.785,0.68995,2.87385,0.0,55.1822,100.0
+deflate,4_Documents_Text,2,2680260.0,395449.5,7.27,83.875,3.87,0.7579,1.17725,0.0,73.352,100.0
+tiff_lzw,1_Natural_Complex,2,3096960.0,3025834.0,1.05,3.18,23.235,0.1457,0.0217,0.0,67.53285,100.0
+tiff_lzw,2_Flat_Graphics,2,4033537.5,915385.0,4.94,78.46,5.175,0.0496,0.0191,0.0,53.8942,100.0
+tiff_lzw,3_Textures_Noisy,2,3871104.0,4247717.0,0.92,-8.91,26.14,0.08855,0.03495,0.0,55.1822,100.0
+tiff_lzw,4_Documents_Text,2,2680260.0,483287.0,6.515,79.76,4.86,0.02955,0.00995,0.0,73.352,100.0
+webp_lossless,1_Natural_Complex,2,3096960.0,1612897.0,2.305,49.27,12.18,137.85845,7.0082,0.0,67.53285,100.0
+webp_lossless,2_Flat_Graphics,2,4033537.5,903585.0,4.68,78.24,5.225,108.3829,6.1314,0.0,53.8942,100.0
+webp_lossless,3_Textures_Noisy,2,3871104.0,3282908.0,1.29,18.515,19.56,88.79115,9.41065,0.0,55.1822,100.0
+webp_lossless,4_Documents_Text,2,2680260.0,498895.0,5.49,80.1,4.775,147.60045,2.30495,0.0,73.352,100.0

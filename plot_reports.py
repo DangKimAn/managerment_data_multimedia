@@ -10,6 +10,13 @@ Instead of per-file bar charts, generates statistical summary charts:
 
 import os
 import argparse
+
+# Keep Matplotlib's writable cache inside the ignored benchmark-output folder.
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_not_commit", ".matplotlib"),
+)
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -514,13 +521,235 @@ def generate_benchmark_charts(
     print(f"\n[+] Summary statistics table: {os.path.join(charts_dir, 'summary_statistics.csv')}\n")
 
 
+def generate_comparison_charts(
+    algo_names: list[str],
+    run_ids: list[int],
+    base_input_dir: str = "output_not_commit",
+    base_plot_dir: str = "output",
+):
+    """Generate fair comparison tables and charts for two or more codecs."""
+    if len(algo_names) < 2:
+        raise ValueError("Comparison requires at least two algorithms.")
+
+    merged_by_algorithm = {}
+    for algo_name in algo_names:
+        df_comp, df_decomp = _load_all_runs(base_input_dir, algo_name, run_ids)
+        if df_comp is None or df_decomp is None:
+            print(f"[WARNING] Missing reports for '{algo_name}', skipping it.")
+            continue
+
+        merged = pd.merge(
+            df_comp,
+            df_decomp,
+            on=["filename", "run_id"],
+            suffixes=("_compress", "_decompress"),
+        )
+        merged["algorithm"] = algo_name
+        merged_by_algorithm[algo_name] = merged
+
+    if len(merged_by_algorithm) < 2:
+        print("[ERROR] At least two algorithms with complete reports are required.")
+        return
+
+    # Keep only image/run pairs present for every codec so the comparison is fair.
+    common_keys = None
+    for frame in merged_by_algorithm.values():
+        keys = set(zip(frame["filename"], frame["run_id"]))
+        common_keys = keys if common_keys is None else common_keys & keys
+
+    if not common_keys:
+        print("[ERROR] The algorithm reports do not contain common image/run pairs.")
+        return
+
+    comparison_frames = []
+    for algo_name, frame in merged_by_algorithm.items():
+        row_keys = list(zip(frame["filename"], frame["run_id"]))
+        filtered = frame[[key in common_keys for key in row_keys]].copy()
+        filtered["algorithm"] = algo_name
+        comparison_frames.append(filtered)
+
+    comparison = pd.concat(comparison_frames, ignore_index=True)
+    comparison["algorithm_label"] = comparison["algorithm"].str.upper()
+    comparison["is_lossless_numeric"] = (
+        comparison["is_lossless"].astype(str).str.lower().eq("true").astype(float)
+    )
+
+    charts_dir = os.path.join(base_plot_dir, "comparison", "charts")
+    os.makedirs(charts_dir, exist_ok=True)
+
+    summary_rows = []
+    for algo_name, frame in comparison.groupby("algorithm", sort=False):
+        summary_rows.append({
+            "algorithm": algo_name,
+            "samples": len(frame),
+            "unique_images": frame["filename"].nunique(),
+            "original_bytes_mean": frame["original_bytes"].mean(),
+            "compressed_bytes_mean": frame["compressed_bytes_compress"].mean(),
+            "compression_ratio_mean": frame["compression_ratio"].mean(),
+            "compression_ratio_median": frame["compression_ratio"].median(),
+            "compression_ratio_std": frame["compression_ratio"].std(),
+            "space_saving_mean_pct": frame["space_saving_pct"].mean(),
+            "bits_per_pixel_mean": frame["bits_per_pixel"].mean(),
+            "compress_time_mean_sec": frame["avg_compress_time_sec"].mean(),
+            "decompress_time_mean_sec": frame["avg_decompress_time_sec"].mean(),
+            "compress_speed_mean_mb_s": frame["compress_speed_mb_s"].mean(),
+            "decompress_speed_mean_mb_s": frame["decompress_speed_mb_s"].mean(),
+            "lossless_rate_pct": frame["is_lossless_numeric"].mean() * 100.0,
+            "mse_mean": frame["mse"].mean(),
+        })
+
+    summary = pd.DataFrame(summary_rows).round(6)
+    summary.to_csv(
+        os.path.join(charts_dir, "comparison_summary.csv"),
+        index=False,
+        encoding="utf-8",
+    )
+    comparison.to_csv(
+        os.path.join(charts_dir, "comparison_details.csv"),
+        index=False,
+        encoding="utf-8",
+    )
+
+    if "image_group" in comparison.columns:
+        group_summary = comparison.groupby(
+            ["algorithm", "image_group"], as_index=False
+        ).agg(
+            images=("filename", "nunique"),
+            original_bytes_mean=("original_bytes", "mean"),
+            compressed_bytes_mean=("compressed_bytes_compress", "mean"),
+            compression_ratio_mean=("compression_ratio", "mean"),
+            space_saving_mean_pct=("space_saving_pct", "mean"),
+            bits_per_pixel_mean=("bits_per_pixel", "mean"),
+            compress_time_mean_sec=("avg_compress_time_sec", "mean"),
+            decompress_time_mean_sec=("avg_decompress_time_sec", "mean"),
+            lossless_rate=("is_lossless_numeric", "mean"),
+            mse_mean=("mse", "mean"),
+            pixel_std_mean=("pixel_std", "mean"),
+        )
+        group_summary["lossless_rate_pct"] = group_summary.pop("lossless_rate") * 100.0
+        group_summary.round(6).to_csv(
+            os.path.join(charts_dir, "comparison_by_image_type.csv"),
+            index=False,
+            encoding="utf-8",
+        )
+
+    labels = summary["algorithm"].str.upper().tolist()
+    x = np.arange(len(labels))
+    colors = sns.color_palette("Set2", len(labels))
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), dpi=CHART_DPI)
+    axes[0].bar(x, summary["compression_ratio_mean"], color=colors)
+    axes[0].set_title("Mean Compression Ratio")
+    axes[0].set_ylabel("Compression Ratio (x)")
+    axes[0].set_xticks(x, labels)
+    axes[1].bar(x, summary["space_saving_mean_pct"], color=colors)
+    axes[1].set_title("Mean Space Saving")
+    axes[1].set_ylabel("Space Saving (%)")
+    axes[1].set_xticks(x, labels)
+    fig.suptitle("Lossless Compression Efficiency by Algorithm", fontweight="bold")
+    plt.tight_layout()
+    fig.savefig(os.path.join(charts_dir, "1_compression_efficiency.png"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=CHART_DPI)
+    sns.boxplot(
+        data=comparison,
+        x="algorithm_label",
+        y="compression_ratio",
+        hue="algorithm_label",
+        palette="Set2",
+        legend=False,
+        ax=ax,
+    )
+    ax.set_title("Compression Ratio Distribution by Algorithm", fontweight="bold")
+    ax.set_xlabel("Algorithm")
+    ax.set_ylabel("Compression Ratio (x)")
+    plt.tight_layout()
+    fig.savefig(os.path.join(charts_dir, "2_compression_ratio_boxplot.png"))
+    plt.close(fig)
+
+    width = 0.36
+    fig, ax = plt.subplots(figsize=(11, 6), dpi=CHART_DPI)
+    ax.bar(
+        x - width / 2,
+        summary["compress_time_mean_sec"],
+        width,
+        label="Compress",
+        color="#DD8452",
+    )
+    ax.bar(
+        x + width / 2,
+        summary["decompress_time_mean_sec"],
+        width,
+        label="Decompress",
+        color="#4C72B0",
+    )
+    ax.set_title("Mean Processing Time by Algorithm", fontweight="bold")
+    ax.set_xlabel("Algorithm")
+    ax.set_ylabel("Time (seconds)")
+    ax.set_xticks(x, labels)
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(os.path.join(charts_dir, "3_processing_time.png"))
+    plt.close(fig)
+
+    if "image_group" in comparison.columns:
+        grouped = comparison.groupby(
+            ["image_group", "algorithm_label"], as_index=False
+        )["compression_ratio"].mean()
+        fig, ax = plt.subplots(figsize=(13, 6), dpi=CHART_DPI)
+        sns.barplot(
+            data=grouped,
+            x="image_group",
+            y="compression_ratio",
+            hue="algorithm_label",
+            palette="Set2",
+            ax=ax,
+        )
+        ax.set_title("Mean Compression Ratio by Image Type", fontweight="bold")
+        ax.set_xlabel("Image Type")
+        ax.set_ylabel("Compression Ratio (x)")
+        ax.tick_params(axis="x", rotation=15)
+        ax.legend(title="Algorithm")
+        plt.tight_layout()
+        fig.savefig(os.path.join(charts_dir, "4_compression_ratio_by_image_type.png"))
+        plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(11, 7), dpi=CHART_DPI)
+    sns.scatterplot(
+        data=comparison,
+        x="compress_speed_mb_s",
+        y="compression_ratio",
+        hue="algorithm_label",
+        palette="Set2",
+        alpha=0.65,
+        ax=ax,
+    )
+    ax.set_title("Compression Speed vs Compression Ratio", fontweight="bold")
+    ax.set_xlabel("Compression Speed (MB/s)")
+    ax.set_ylabel("Compression Ratio (x)")
+    ax.legend(title="Algorithm")
+    plt.tight_layout()
+    fig.savefig(os.path.join(charts_dir, "5_speed_vs_compression_ratio.png"))
+    plt.close(fig)
+
+    print(
+        f"[+] Compared {len(merged_by_algorithm)} algorithms on "
+        f"{len(common_keys)} common image/run pairs."
+    )
+    print(f"[+] Comparison reports and charts: {charts_dir}")
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Generate statistical Matplotlib charts from large-scale benchmark reports"
     )
-    parser.add_argument("--algo", "-a", type=str, default="deflate",
-                        help="Algorithm name (default: 'deflate')")
+    algorithm_group = parser.add_mutually_exclusive_group()
+    algorithm_group.add_argument("--algo", "-a", type=str,
+                                 help="Generate the detailed report for one algorithm")
+    algorithm_group.add_argument("--algos", type=str, nargs="+",
+                                 help="Compare two or more algorithms")
     parser.add_argument("--runs", "-r", type=int, nargs="+", default=_DEFAULT_RUNS,
                         help=f"One or more run IDs to include (e.g. --runs 1 2 3 4 5). Default: {_DEFAULT_RUNS}")
     parser.add_argument("--input-dir", "-i", type=str, default="output_not_commit",
@@ -529,9 +758,17 @@ if __name__ == "__main__":
                         help="Output directory for plot charts (default: 'output')")
     args = parser.parse_args()
 
-    generate_benchmark_charts(
-        algo_name=args.algo,
-        run_ids=args.runs,
-        base_input_dir=args.input_dir,
-        base_plot_dir=args.plot_dir
-    )
+    if args.algos:
+        generate_comparison_charts(
+            algo_names=args.algos,
+            run_ids=args.runs,
+            base_input_dir=args.input_dir,
+            base_plot_dir=args.plot_dir,
+        )
+    else:
+        generate_benchmark_charts(
+            algo_name=args.algo or "deflate",
+            run_ids=args.runs,
+            base_input_dir=args.input_dir,
+            base_plot_dir=args.plot_dir,
+        )

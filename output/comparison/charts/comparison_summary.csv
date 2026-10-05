@@ -1,0 +1,4 @@
+algorithm,samples,unique_images,original_bytes_mean,compressed_bytes_mean,compression_ratio_mean,compression_ratio_median,compression_ratio_std,space_saving_mean_pct,bits_per_pixel_mean,compress_time_mean_sec,decompress_time_mean_sec,compress_speed_mean_mb_s,decompress_speed_mean_mb_s,lossless_rate_pct,mse_mean
+deflate,8,8,3420465.375,1246968.625,4.94,3.99,3.589043,64.9875,8.4025,1.1154,2.3171,4.14625,1.66125,100.0,0.0
+tiff_lzw,8,8,3420465.375,2168055.75,3.35625,2.25,3.184668,38.1225,14.8525,0.07835,0.021425,58.27375,178.36125,100.0,0.0
+webp_lossless,8,8,3420465.375,1574571.25,3.44125,3.535,2.101139,56.53125,10.435,120.658238,6.2138,0.04125,0.66875,100.0,0.0

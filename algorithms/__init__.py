@@ -47,6 +47,11 @@ from .deflate import (
     decompress_image_deflate,
     benchmark_image_compression,
 )
+from .tiff_lzw import (
+    TiffLzwCompressor,
+    compress_image_tiff_lzw,
+    decompress_image_tiff_lzw,
+)
 
 from .webp_lossless import (
     # WebP Lossless Compressor
@@ -98,4 +103,8 @@ __all__ = [
     # WebP Lossless Transforms
     "apply_subtract_green",
     "inverse_subtract_green",
+    # TIFF-LZW Compressor
+    "TiffLzwCompressor",
+    "compress_image_tiff_lzw",
+    "decompress_image_tiff_lzw",
 ]

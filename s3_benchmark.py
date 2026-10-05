@@ -11,7 +11,7 @@ import json
 import time
 import gc
 from io import BytesIO
-from typing import Callable, Dict, List, Optional, Any, Generator, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Any, Generator, Tuple
 
 import numpy as np
 from PIL import Image
@@ -150,6 +150,8 @@ def _process_single_image(
     img: Image.Image,
     compress_fn: Callable[[Image.Image], bytes],
     decompress_fn: Callable[[bytes], Image.Image],
+    algo_name: str,
+    file_extension: str,
     num_runs: int,
     compress_dir: str,
     images_out_dir: str,
@@ -187,12 +189,14 @@ def _process_single_image(
     comp_speed = (orig_size / (1024 * 1024)) / avg_comp if avg_comp > 0 else 0
 
     # Ghi file nén xuống đĩa
-    out_fname = f"{os.path.splitext(fname)[0]}.defimg"
+    extension = file_extension if file_extension.startswith(".") else f".{file_extension}"
+    out_fname = f"{os.path.splitext(fname)[0]}{extension}"
     out_path = os.path.join(compress_dir, out_fname)
     with open(out_path, "wb") as f:
         f.write(comp_bytes)
 
     comp_report = {
+        "algorithm": algo_name,
         "filename": fname,
         "image_group": image_group,
         "compressed_filename": out_fname,
@@ -237,6 +241,7 @@ def _process_single_image(
     gc.collect()
 
     decomp_report = {
+        "algorithm": algo_name,
         "filename": fname,
         "restored_path": out_image_path,
         "dimensions": f"{img.width}x{img.height}",
@@ -253,6 +258,166 @@ def _process_single_image(
     return comp_report, decomp_report
 
 
+def _write_report_csv(
+    report_dir: str,
+    filename: str,
+    reports: List[Dict[str, Any]],
+) -> None:
+    """Atomically checkpoint report rows so interrupted runs keep their data."""
+    if not reports:
+        return
+
+    output_path = os.path.join(report_dir, filename)
+    temporary_path = f"{output_path}.tmp"
+    rows = sorted(reports, key=lambda row: row["filename"])
+    with open(temporary_path, "w", newline="", encoding="utf-8") as report_file:
+        writer = csv.DictWriter(report_file, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(temporary_path, output_path)
+
+
+def _write_report_json(
+    report_dir: str,
+    filename: str,
+    reports: List[Dict[str, Any]],
+) -> None:
+    """Write the completed JSON report for one operation."""
+    if not reports:
+        return
+
+    output_path = os.path.join(report_dir, filename)
+    temporary_path = f"{output_path}.tmp"
+    rows = sorted(reports, key=lambda row: row["filename"])
+    with open(temporary_path, "w", encoding="utf-8") as report_file:
+        json.dump(rows, report_file, indent=2, ensure_ascii=False)
+    os.replace(temporary_path, output_path)
+
+
+def run_multi_codec_benchmark_pipeline(
+    codecs: Mapping[str, Tuple[Callable, Callable, str]],
+    run_id: int = 1,
+    num_runs: int = 1,
+    limit_files: int = 10,
+    max_workers: int = 1,
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch each image once, then benchmark every codec sequentially on it.
+
+    Sequential codec execution keeps timing measurements comparable. CSV files
+    are checkpointed after every successful codec/image pair, while JSON files
+    are written when the complete run finishes.
+    """
+    if not codecs:
+        raise ValueError("At least one codec is required.")
+    if num_runs < 1:
+        raise ValueError("num_runs must be at least 1")
+
+    base_output_dir = "output_not_commit"
+    state: Dict[str, Dict[str, Any]] = {}
+
+    for algo_name in codecs:
+        compress_root = os.path.join(base_output_dir, algo_name, str(run_id), "compress")
+        compress_dir = os.path.join(compress_root, "files")
+        images_out_dir = os.path.join(compress_root, "images")
+        report_dir = os.path.join(compress_root, "report")
+        os.makedirs(compress_dir, exist_ok=True)
+        os.makedirs(images_out_dir, exist_ok=True)
+        os.makedirs(report_dir, exist_ok=True)
+        state[algo_name] = {
+            "compress_dir": compress_dir,
+            "images_out_dir": images_out_dir,
+            "report_dir": report_dir,
+            "compression": [],
+            "decompression": [],
+        }
+
+    print(f"\n{'=' * 80}")
+    print("MULTI-CODEC BENCHMARK: ONE S3 IMAGE -> ALL CODECS")
+    print(f"Run: {run_id} | Images per group: {limit_files} | Timing repeats: {num_runs}")
+    print(f"Codec order: {' -> '.join(codecs)}")
+    if max_workers != 1:
+        print("Note: codecs run sequentially; --workers is ignored for fair timing.")
+    print(f"{'=' * 80}")
+
+    total_images = 0
+    for fname, img in stream_s3_images(limit=limit_files):
+        total_images += 1
+        print(f"\n[{total_images:>4}] {fname} ({img.width}x{img.height})")
+
+        try:
+            for algo_name, (compress_fn, decompress_fn, file_extension) in codecs.items():
+                algo_state = state[algo_name]
+                print(f"       {algo_name:<16}", end="", flush=True)
+                try:
+                    comp_report, decomp_report = _process_single_image(
+                        fname=fname,
+                        img=img,
+                        compress_fn=compress_fn,
+                        decompress_fn=decompress_fn,
+                        algo_name=algo_name,
+                        file_extension=file_extension,
+                        num_runs=num_runs,
+                        compress_dir=algo_state["compress_dir"],
+                        images_out_dir=algo_state["images_out_dir"],
+                    )
+                    algo_state["compression"].append(comp_report)
+                    algo_state["decompression"].append(decomp_report)
+
+                    _write_report_csv(
+                        algo_state["report_dir"],
+                        "compression_report.csv",
+                        algo_state["compression"],
+                    )
+                    _write_report_csv(
+                        algo_state["report_dir"],
+                        "decompression_report.csv",
+                        algo_state["decompression"],
+                    )
+
+                    lossless = "OK" if decomp_report["is_lossless"] else "FAIL"
+                    print(
+                        f" CR={comp_report['compression_ratio']:.2f}x"
+                        f" | saving={comp_report['space_saving_pct']:.1f}%"
+                        f" | lossless={lossless}"
+                    )
+                except Exception as error:
+                    print(f" ERROR: {error}")
+        finally:
+            img.close()
+            del img
+            gc.collect()
+
+    print(f"\n{'=' * 80}")
+    print(f"MULTI-CODEC RUN {run_id} COMPLETE: {total_images} S3 images fetched once each")
+    for algo_name, algo_state in state.items():
+        comp_reports = algo_state["compression"]
+        decomp_reports = algo_state["decompression"]
+        _write_report_json(
+            algo_state["report_dir"],
+            "compression_report.json",
+            comp_reports,
+        )
+        _write_report_json(
+            algo_state["report_dir"],
+            "decompression_report.json",
+            decomp_reports,
+        )
+
+        if comp_reports:
+            avg_cr = sum(row["compression_ratio"] for row in comp_reports) / len(comp_reports)
+            lossless_count = sum(row["is_lossless"] for row in decomp_reports)
+            print(
+                f"  {algo_name:<16} images={len(comp_reports):>4}"
+                f" | avg CR={avg_cr:.2f}x"
+                f" | lossless={lossless_count}/{len(decomp_reports)}"
+            )
+        else:
+            print(f"  {algo_name:<16} no successful images")
+    print(f"{'=' * 80}\n")
+
+    return state
+
+
 # ==============================================================================
 # 3. PIPELINE CHÍNH — XỬ LÝ TỪNG ẢNH, TRÁNH TRÀN RAM
 # ==============================================================================
@@ -260,6 +425,7 @@ def run_s3_benchmark_pipeline(
     compress_fn: Optional[Callable[[Image.Image], bytes]] = None,
     decompress_fn: Optional[Callable[[bytes], Image.Image]] = None,
     algo_name: str = "deflate",
+    file_extension: str = ".defimg",
     run_id: int = 1,
     num_runs: int = 1,
     limit_files: int = 10,
@@ -283,6 +449,9 @@ def run_s3_benchmark_pipeline(
             compress_fn = compressor.compress
         if decompress_fn is None:
             decompress_fn = compressor.decompress
+
+    if num_runs < 1:
+        raise ValueError("num_runs must be at least 1")
 
     # Chuẩn bị thư mục output
     base_output_dir = "output_not_commit"
@@ -317,6 +486,8 @@ def run_s3_benchmark_pipeline(
                 img=img,
                 compress_fn=compress_fn,
                 decompress_fn=decompress_fn,
+                algo_name=algo_name,
+                file_extension=file_extension,
                 num_runs=num_runs,
                 compress_dir=compress_dir,
                 images_out_dir=images_out_dir,
