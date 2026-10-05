@@ -1,34 +1,34 @@
-# Quản lý dữ liệu đa phương tiện - So sánh nén ảnh không tổn thất
+# Multimedia Data Management - Lossless Image Compression Comparison
 
-Project dùng cùng một bộ ảnh trên AWS S3 để benchmark và so sánh ba phương pháp nén ảnh không tổn thất:
+This project benchmarks and compares three lossless image-compression methods on the same AWS S3 image dataset:
 
 - DEFLATE
 - TIFF-LZW
 - WebP Lossless
 
-## 1. Cài đặt môi trường
+## 1. Environment Setup
 
-### Bước 1: Tạo môi trường ảo
+### Step 1: Create a virtual environment
 
 ```powershell
 python -m venv .venv
 ```
 
-Kích hoạt môi trường trên Windows PowerShell:
+Activate it in Windows PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-### Bước 2: Cài thư viện
+### Step 2: Install dependencies
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-### Bước 3: Cấu hình `.env`
+### Step 3: Configure `.env`
 
-Tạo file `.env` tại thư mục gốc của project và khai báo:
+Create a `.env` file in the project root with the following values:
 
 ```env
 ENVIRONMENT=development
@@ -43,58 +43,58 @@ IMAGES_PER_GROUP=100
 TOTAL_RUNS=5
 ```
 
-Ý nghĩa cấu hình:
+Configuration details:
 
-- `IMAGES_PER_GROUP`: số ảnh tối đa lấy từ mỗi nhóm trên S3.
-- `TOTAL_RUNS`: số lần chạy lại toàn bộ benchmark.
-- `S3_BASE_PREFIX`: thư mục gốc chứa dataset trên S3.
+- `IMAGES_PER_GROUP`: maximum number of images loaded from each S3 group.
+- `TOTAL_RUNS`: number of times the complete benchmark is repeated.
+- `S3_BASE_PREFIX`: root directory containing the dataset in S3.
 
-Không đưa file `.env` hoặc AWS credential thật lên Git. File `.env.example` chỉ được chứa giá trị minh họa.
+Never commit `.env` or real AWS credentials. `.env.example` must contain placeholder values only.
 
-## 2. Flow benchmark
+## 2. Benchmark Flow
 
-Khi chạy `--algo all`, mỗi ảnh chỉ được tải một lần từ S3 rồi lần lượt đi qua ba codec:
+When `--algo all` is selected, each image is downloaded from S3 once and then processed sequentially by all three codecs:
 
 ```text
-Tải ảnh 1 từ S3
-├── DEFLATE     → nén → giải nén → đo → ghi CSV
-├── TIFF-LZW    → nén → giải nén → đo → ghi CSV
-└── WebP        → nén → giải nén → đo → ghi CSV
-↓ giải phóng ảnh khỏi RAM
-Tải ảnh 2 và lặp lại
+Download image 1 from S3
+├── DEFLATE     → compress → decompress → measure → checkpoint CSV
+├── TIFF-LZW    → compress → decompress → measure → checkpoint CSV
+└── WebP        → compress → decompress → measure → checkpoint CSV
+↓ release the image from memory
+Download image 2 and repeat
 ```
 
-Ba codec chạy tuần tự trên cùng dữ liệu pixel để kết quả thời gian không bị ảnh hưởng bởi việc tranh CPU. CSV được checkpoint sau từng codec/ảnh nên những dòng đã hoàn thành vẫn còn nếu chương trình bị gián đoạn.
+The codecs run sequentially on the same pixel data so their timing results are not distorted by CPU contention. CSV reports are checkpointed after every codec/image result, so completed rows remain available if the process is interrupted.
 
-## 3. Cách chạy
+## 3. Running the Project
 
-### Chạy thử với ít ảnh
+### Quick test with a small dataset
 
-Lệnh sau chạy một lần, lấy tối đa hai ảnh từ mỗi nhóm S3 và đo mỗi thao tác một lần:
+The following command runs one benchmark round, loads up to two images from each S3 group, and measures each operation once:
 
 ```powershell
 python run.py --algo all --total-runs 1 --limit 2 --repeat 1
 ```
 
-Sau khi benchmark hoàn tất, tạo bảng và biểu đồ so sánh:
+After the benchmark finishes, generate the comparison tables and charts:
 
 ```powershell
 python plot_reports.py --algos deflate tiff_lzw webp_lossless --runs 1
 ```
 
-### Chạy đầy đủ theo `.env`
+### Full benchmark using `.env`
 
 ```powershell
 python run.py --algo all
 ```
 
-Sau đó tạo báo cáo cho các lần chạy được cấu hình bởi `TOTAL_RUNS`:
+Generate reports for the runs configured by `TOTAL_RUNS`:
 
 ```powershell
 python plot_reports.py --algos deflate tiff_lzw webp_lossless
 ```
 
-### Chạy riêng từng thuật toán
+### Run one algorithm only
 
 ```powershell
 python run.py --algo deflate
@@ -102,7 +102,7 @@ python run.py --algo tiff_lzw
 python run.py --algo webp_lossless
 ```
 
-Tạo biểu đồ riêng cho một thuật toán:
+Generate charts for one algorithm:
 
 ```powershell
 python plot_reports.py --algo deflate
@@ -110,45 +110,45 @@ python plot_reports.py --algo tiff_lzw
 python plot_reports.py --algo webp_lossless
 ```
 
-### Các tham số của `run.py`
+### `run.py` options
 
 ```text
---algo, -a         Thuật toán: deflate, tiff_lzw, webp_lossless hoặc all
---total-runs, -r   Số lần chạy toàn bộ benchmark
---limit, -l        Số ảnh tối đa lấy từ mỗi nhóm S3
---repeat, -n       Số lần lặp nén/giải nén trên mỗi ảnh để đo thời gian
---filter, -f       Bộ lọc không gian dành riêng cho DEFLATE
---pure-python      Dùng DEFLATE LZ77 + Huffman Python thuần
---workers, -w      Dành cho chế độ song song trong tương lai; hiện chạy tuần tự
+--algo, -a         Algorithm: deflate, tiff_lzw, webp_lossless, or all
+--total-runs, -r   Number of complete benchmark runs
+--limit, -l        Maximum images loaded from each S3 group
+--repeat, -n       Compression/decompression repetitions per image for timing
+--filter, -f       Spatial filter used only by DEFLATE
+--pure-python      Use the educational pure-Python LZ77 + Huffman DEFLATE engine
+--workers, -w      Reserved for a future parallel mode; current timing mode is sequential
 ```
 
-Xem toàn bộ tùy chọn:
+Display all available options:
 
 ```powershell
 python run.py --help
 python plot_reports.py --help
 ```
 
-## 4. Các chỉ số được đo
+## 4. Measured Metrics
 
-Với mỗi ảnh và mỗi thuật toán, pipeline ghi nhận:
+For every image and algorithm, the pipeline records:
 
-- Kích thước dữ liệu pixel gốc.
-- Kích thước sau nén.
-- Tỷ lệ nén.
-- Phần trăm tiết kiệm dung lượng.
-- Số bit trên mỗi pixel (BPP).
-- Thời gian và tốc độ nén.
-- Thời gian và tốc độ giải nén.
-- Kiểm tra ảnh khôi phục có giống ảnh gốc 100% hay không.
-- MSE và PSNR.
-- Nhóm ảnh và độ lệch chuẩn pixel để phân tích ảnh hưởng của đặc điểm ảnh.
+- Original raw pixel size.
+- Compressed size.
+- Compression ratio.
+- Space-saving percentage.
+- Bits per pixel (BPP).
+- Compression time and speed.
+- Decompression time and speed.
+- Whether the restored image is 100% identical to the original.
+- MSE and PSNR.
+- Image group and pixel standard deviation for analyzing how image characteristics affect compression.
 
-`original_bytes` là kích thước dữ liệu pixel thô, không phải dung lượng file BMP ban đầu trên S3.
+`original_bytes` represents the uncompressed pixel data size, not the original BMP file size in S3.
 
-## 5. Kết quả đầu ra
+## 5. Output Files
 
-File nén, ảnh khôi phục và report riêng của từng thuật toán:
+Compressed files, restored images, and per-algorithm reports:
 
 ```text
 output_not_commit/
@@ -166,7 +166,7 @@ output_not_commit/
     └── report/
 ```
 
-Mỗi thư mục `report/` chứa:
+Each `report/` directory contains:
 
 ```text
 compression_report.csv
@@ -175,7 +175,7 @@ decompression_report.csv
 decompression_report.json
 ```
 
-Bảng và biểu đồ so sánh ba thuật toán:
+Three-algorithm comparison tables and charts:
 
 ```text
 output/comparison/charts/
@@ -189,19 +189,19 @@ output/comparison/charts/
 └── 5_speed_vs_compression_ratio.png
 ```
 
-`plot_reports.py` chỉ so sánh các cặp `filename + run_id` xuất hiện ở tất cả thuật toán được chọn. Điều này bảo đảm các thuật toán được đánh giá trên cùng bộ ảnh.
+`plot_reports.py` compares only `filename + run_id` pairs available for every selected algorithm. This ensures that all algorithms are evaluated on the same images.
 
-## 6. Các file chính
+## 6. Main Files
 
-- `algorithms/`: code nén và giải nén của từng thuật toán.
-- `run.py`: chọn codec và điều phối benchmark.
-- `s3_benchmark.py`: tải ảnh S3, đo các chỉ số và ghi report.
-- `plot_reports.py`: tổng hợp CSV và tạo biểu đồ.
-- `s3_storage.py`: đọc và ghi dữ liệu trên S3.
-- `crawl_dataset.py`: thu thập dataset và đưa ảnh lên S3.
+- `algorithms/`: compression and decompression implementations for each algorithm.
+- `run.py`: selects codecs and coordinates benchmark runs.
+- `s3_benchmark.py`: downloads S3 images, measures metrics, and writes reports.
+- `plot_reports.py`: aggregates CSV data and generates charts.
+- `s3_storage.py`: reads and writes S3 objects.
+- `crawl_dataset.py`: collects the dataset and uploads images to S3.
 
-## 7. Lưu ý về WebP hiện tại
+## 7. Current WebP Limitation
 
-WebP hiện tại khôi phục pixel không tổn thất khi dùng compressor và decompressor của project. Tuy nhiên payload VP8L đang dùng cấu trúc tùy biến nên chưa thể đọc bằng decoder WebP chuẩn như Pillow/libwebp.
+The current WebP implementation restores pixels losslessly when used with the project's own compressor and decompressor. However, its VP8L payload uses a custom structure and cannot yet be decoded by standard WebP implementations such as Pillow/libwebp.
 
-Vì vậy, trước khi đưa ra kết luận cuối cùng về WebP Lossless chuẩn, cần chuyển codec này sang libwebp/Pillow hoặc triển khai đầy đủ đặc tả VP8L.
+Before drawing final conclusions about standards-compliant WebP Lossless, replace this codec with libwebp/Pillow or implement the complete VP8L specification.
