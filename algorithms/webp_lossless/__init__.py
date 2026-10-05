@@ -25,12 +25,15 @@ from ..common import (
     lz77_decompress,
     lz77_encode,
     lz77_decode,
-    # Huffman
     HuffmanNode,
     build_huffman_tree,
     build_codes,
     huffman_encode,
     huffman_decode,
+    # WebP Canonical Huffman
+    huffman_webp_encode,
+    huffman_webp_decode,
+    build_canonical_codes,
 )
 from .compressor import (
     # WebP Lossless Compressor
@@ -74,6 +77,10 @@ __all__ = [
     "build_codes",
     "huffman_encode",
     "huffman_decode",
+    # WebP Canonical Huffman
+    "huffman_webp_encode",
+    "huffman_webp_decode",
+    "build_canonical_codes",
     # WebP Lossless Compressor
     "WebPLosslessCompressor",
     "compress_image_webp_lossless",

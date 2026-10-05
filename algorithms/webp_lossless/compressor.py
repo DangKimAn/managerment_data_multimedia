@@ -1,15 +1,23 @@
 """
-WebP Lossless Image Compressor Module  (algorithms/webp_lossless/compressor.py)
-Coordinates the whole WebP Lossless compression pipeline:
-1. Loads and flattens image pixels           (using image_utils)
-2. Applies Subtract Green Transform          (WebP-specific color decorrelation)
-3. Applies 2D spatial prediction filtering   (using spatial_filters)
-4. Compresses with LZ77 sliding window       (using lz77)
-5. Encodes with Huffman entropy coding        (using huffman)
-6. Wraps in RIFF WebP container with VP8L chunk header
+WebP Lossless Image Compressor Module (algorithms/webp_lossless/compressor.py)
+
+Coordinates the WebP Lossless compression pipeline supporting two engines:
+1. Standard LibWebP Engine (default, use_pure_python=False):
+   - Fast, C-accelerated WebP Lossless encoder via Google libwebp (Pillow).
+   - Generates 100% compliant .webp files readable by any browser or image viewer.
+2. Pure Python Educational Engine (use_pure_python=True):
+   - Modular educational pipeline for studying WebP internal algorithms:
+     * Step 1: Pixel loading and flattening (image_utils)
+     * Step 2: Subtract Green Transform (color decorrelation)
+     * Step 3: Spatial prediction filtering (spatial_filters)
+     * Step 4: LZ77 sliding window dictionary coding (lz77)
+     * Step 5: Canonical Huffman coding with LSB-first bitstream (huffman_webp)
+     * Step 6: RIFF WebP container with VP8L chunk packing
+
 Written in simple A2/B1 English.
 """
 
+import io
 import os
 import struct
 import time
@@ -23,45 +31,46 @@ from ..common.image_utils import (
     load_image,
     raw_bytes_to_image,
     save_image,
-    calculate_image_metrics
+    calculate_image_metrics,
 )
 from ..common.spatial_filters import (
     FilterType,
     filter_scanlines,
-    unfilter_scanlines
+    unfilter_scanlines,
 )
 from ..common.lz77 import lz77_encode, lz77_decode
-from ..common.huffman import huffman_encode, huffman_decode
+from ..common.huffman_webp import huffman_webp_encode, huffman_webp_decode
 
 
 # ==============================================================================
 # RIFF / WEBP / VP8L CONTAINER CONSTANTS
 # ==============================================================================
-RIFF_MAGIC = b"RIFF"         # RIFF container identifier
-WEBP_MAGIC = b"WEBP"         # WebP format identifier
-VP8L_CHUNK_ID = b"VP8L"      # VP8L lossless chunk identifier
-VP8L_SIGNATURE = 0x2F        # VP8L bitstream signature byte
-VP8L_VERSION = 0             # VP8L version (must be 0)
+RIFF_MAGIC = b"RIFF"          # RIFF container identifier
+WEBP_MAGIC = b"WEBP"          # WebP format identifier
+VP8L_CHUNK_ID = b"VP8L"       # VP8L lossless chunk identifier
+VP8L_SIGNATURE = 0x2F         # VP8L bitstream signature byte
+VP8L_VERSION = 0              # VP8L version (must be 0)
 
-# Custom transform metadata format (appended after VP8L header)
-# Layout: has_subtract_green (B) + filter_type (B) + original_mode (4s) + channels (B)
-TRANSFORM_META_FORMAT = "<BB4sB"
-TRANSFORM_META_SIZE = struct.calcsize(TRANSFORM_META_FORMAT)  # = 7 bytes
+# Custom transform metadata format for Pure Python pipeline
+# Marker: b"WPPY" (4 bytes) + has_sg (B) + filter_type (B) + original_mode (4s) + channels (B)
+PY_ENGINE_MARKER = b"WPPY"
+TRANSFORM_META_FORMAT = "<4sBB4sB"
+TRANSFORM_META_SIZE = struct.calcsize(TRANSFORM_META_FORMAT)  # = 11 bytes
 
 
 # ==============================================================================
-# SUBTRACT GREEN TRANSFORM (WebP Lossless specific — color decorrelation)
+# SUBTRACT GREEN TRANSFORM (WebP Lossless color decorrelation)
 # ==============================================================================
 
 def apply_subtract_green(rgba_bytes: bytes, width: int, height: int) -> bytes:
     """
-    Subtract Green Transform — reduces inter-channel color correlation.
+    Subtract Green Transform - reduces inter-channel color correlation.
 
     For each RGBA pixel:
-        R' = (R - G) mod 256   ← Red minus Green
-        B' = (B - G) mod 256   ← Blue minus Green
-        G' = G                 ← Green unchanged
-        A' = A                 ← Alpha unchanged
+        R' = (R - G) mod 256   <- Red minus Green
+        B' = (B - G) mod 256   <- Blue minus Green
+        G' = G                 <- Green unchanged
+        A' = A                 <- Alpha unchanged
 
     This exploits the fact that natural images have strong correlation between
     RGB channels. By subtracting G from R and B, the residual values cluster
@@ -87,7 +96,7 @@ def apply_subtract_green(rgba_bytes: bytes, width: int, height: int) -> bytes:
 
 def inverse_subtract_green(transformed_bytes: bytes, width: int, height: int) -> bytes:
     """
-    Reverse Subtract Green Transform — restore original R and B channels.
+    Reverse Subtract Green Transform - restore original R and B channels.
 
     For each RGBA pixel:
         R = (R' + G) mod 256
@@ -98,7 +107,7 @@ def inverse_subtract_green(transformed_bytes: bytes, width: int, height: int) ->
         width:  Image width in pixels.
         height: Image height in pixels.
     Returns:
-        bytes: Original RGBA pixel bytes.
+        bytes: Restored RGBA pixel bytes.
     """
     arr = np.frombuffer(transformed_bytes, dtype=np.uint8).reshape((height, width, 4)).copy()
     green = arr[:, :, 1].astype(np.int16)
@@ -112,42 +121,40 @@ def inverse_subtract_green(transformed_bytes: bytes, width: int, height: int) ->
 
 
 # ==============================================================================
-# RIFF WEBP CONTAINER PACKING / PARSING
+# RIFF CONTAINER PACKING / PARSING
 # ==============================================================================
 
 def pack_riff_webp(vp8l_chunk_data: bytes) -> bytes:
     """
-    Wrap VP8L bitstream data inside a RIFF WebP container.
+    Wrap VP8L chunk data in a valid RIFF container.
 
-    Container layout (little-endian):
-    ┌─────────────────────────────────────────────┐
-    │ 'RIFF'            (4 bytes)                 │
-    │ file_size         (4 bytes LE, = total - 8) │
-    │ 'WEBP'            (4 bytes)                 │
-    │ 'VP8L'            (4 bytes)                 │
-    │ chunk_data_size   (4 bytes LE)              │
-    │ VP8L bitstream    (variable)                │
-    │ [padding byte]    (1 byte if chunk is odd)  │
-    └─────────────────────────────────────────────┘
+    Structure:
+        Offset  Size   Field
+        0       4      "RIFF" magic
+        4       4      File size - 8 (little-endian uint32)
+        8       4      "WEBP" magic
+        12      4      "VP8L" chunk identifier
+        16      4      Chunk data size (little-endian uint32)
+        20      N      VP8L bitstream
+        20+N    0..1   Padding byte (0x00) if N is odd
 
     Args:
-        vp8l_chunk_data: Complete VP8L bitstream bytes.
+        vp8l_chunk_data: VP8L bitstream bytes.
     Returns:
-        bytes: Full RIFF WebP file bytes.
+        bytes: Complete .webp file byte stream.
     """
     chunk_size = len(vp8l_chunk_data)
-    # RIFF spec: add 1 padding byte if chunk data size is odd
-    padding = b"\x00" if chunk_size % 2 != 0 else b""
-    # file_size = everything after 'RIFF' + 4-byte size field
-    #           = 4 (WEBP) + 4 (VP8L) + 4 (chunk_size) + data + padding
-    file_size = 4 + 4 + 4 + chunk_size + len(padding)
+    padding = b"\x00" if (chunk_size % 2 != 0) else b""
+
+    # Total file size minus the 8-byte RIFF header
+    file_size_field = 4 + 8 + chunk_size + len(padding)
 
     riff = bytearray()
-    riff.extend(RIFF_MAGIC)                           # 'RIFF'
-    riff.extend(struct.pack("<I", file_size))          # File size (LE)
-    riff.extend(WEBP_MAGIC)                           # 'WEBP'
-    riff.extend(VP8L_CHUNK_ID)                        # 'VP8L'
-    riff.extend(struct.pack("<I", chunk_size))         # Chunk data size (LE)
+    riff.extend(RIFF_MAGIC)                           # "RIFF"
+    riff.extend(struct.pack("<I", file_size_field))   # File size - 8 (LE)
+    riff.extend(WEBP_MAGIC)                           # "WEBP"
+    riff.extend(VP8L_CHUNK_ID)                        # "VP8L"
+    riff.extend(struct.pack("<I", chunk_size))        # Chunk data size (LE)
     riff.extend(vp8l_chunk_data)                      # VP8L bitstream
     riff.extend(padding)                              # Padding (if odd)
 
@@ -168,25 +175,18 @@ def parse_riff_webp(webp_data: bytes) -> bytes:
     if len(webp_data) < 20:
         raise ValueError("File too short to be a valid WebP file.")
 
-    # Validate RIFF magic
     riff_magic = webp_data[0:4]
     if riff_magic != RIFF_MAGIC:
         raise ValueError(f"Invalid RIFF magic: {riff_magic!r}, expected {RIFF_MAGIC!r}")
 
-    # Read file size (not strictly needed for parsing, but validate)
-    file_size = struct.unpack("<I", webp_data[4:8])[0]
-
-    # Validate WEBP magic
     webp_magic = webp_data[8:12]
     if webp_magic != WEBP_MAGIC:
         raise ValueError(f"Invalid WEBP magic: {webp_magic!r}, expected {WEBP_MAGIC!r}")
 
-    # Validate VP8L chunk identifier
     chunk_id = webp_data[12:16]
     if chunk_id != VP8L_CHUNK_ID:
         raise ValueError(f"Expected VP8L chunk, got: {chunk_id!r}")
 
-    # Read VP8L chunk data size
     chunk_size = struct.unpack("<I", webp_data[16:20])[0]
     vp8l_data = webp_data[20 : 20 + chunk_size]
 
@@ -220,7 +220,6 @@ def pack_vp8l_header(width: int, height: int, has_alpha: bool) -> bytes:
         bytes: 5-byte VP8L header.
     """
     signature = bytes([VP8L_SIGNATURE])
-
     packed = (
         ((width - 1) & 0x3FFF)
         | (((height - 1) & 0x3FFF) << 14)
@@ -228,7 +227,6 @@ def pack_vp8l_header(width: int, height: int, has_alpha: bool) -> bytes:
         | (VP8L_VERSION << 29)
     )
     header_bytes = struct.pack("<I", packed)
-
     return signature + header_bytes
 
 
@@ -253,20 +251,19 @@ def parse_vp8l_header(data: bytes) -> Tuple[int, int, bool, int, int]:
         )
 
     packed = struct.unpack("<I", data[1:5])[0]
-
     width = (packed & 0x3FFF) + 1
     height = ((packed >> 14) & 0x3FFF) + 1
     has_alpha = bool((packed >> 28) & 1)
-    version = (packed >> 29) & 0x7
+    version = (packed >> 29) & 7
 
     if version != VP8L_VERSION:
-        raise ValueError(f"Unsupported VP8L version: {version}, expected {VP8L_VERSION}")
+        raise ValueError(f"Unsupported VP8L version: {version}, expected 0")
 
     return width, height, has_alpha, version, 5
 
 
 # ==============================================================================
-# CUSTOM TRANSFORM METADATA (stored right after VP8L header)
+# TRANSFORM METADATA PACKING / PARSING (Pure Python Engine)
 # ==============================================================================
 
 def pack_transform_metadata(
@@ -276,42 +273,44 @@ def pack_transform_metadata(
     channels: int,
 ) -> bytes:
     """
-    Pack custom transform metadata into binary (7 bytes).
+    Pack transform settings for pure Python engine.
 
-    Stored so the decompressor knows which transforms to reverse.
-
-    Args:
-        has_subtract_green: Whether Subtract Green was applied.
-        filter_type:        FilterType enum value used for spatial filtering.
-        original_mode:      Original image color mode string ("RGB", "RGBA", "L").
-        channels:           Number of color channels (e.g. 4 for RGBA).
-    Returns:
-        bytes: 7-byte packed metadata.
+    Layout:
+        marker:        "WPPY" (4 bytes)
+        has_sg:        uint8 (1 byte, 1 if subtract green applied, 0 otherwise)
+        filter_type:   uint8 (1 byte, FilterType enum int)
+        original_mode: 4 bytes (padded with \x00, e.g. "RGB\x00", "RGBA")
+        channels:      uint8 (1 byte, 1..4)
     """
     mode_bytes = original_mode.encode("ascii").ljust(4, b"\x00")[:4]
     return struct.pack(
         TRANSFORM_META_FORMAT,
+        PY_ENGINE_MARKER,
         int(has_subtract_green),
-        filter_type,
+        int(filter_type),
         mode_bytes,
-        channels,
+        int(channels),
     )
 
 
 def parse_transform_metadata(data: bytes) -> Tuple[bool, int, str, int]:
     """
-    Parse custom transform metadata from binary data.
+    Parse transform metadata for pure Python engine.
 
-    Args:
-        data: At least TRANSFORM_META_SIZE bytes.
     Returns:
-        tuple: (has_subtract_green, filter_type_val, original_mode_str, channels)
+        tuple: (has_subtract_green, filter_type_val, original_mode, channels)
     """
-    has_sg, ftype, mode_bytes, channels = struct.unpack(
+    if len(data) < TRANSFORM_META_SIZE:
+        raise ValueError("Data too short for transform metadata.")
+
+    marker, has_sg, filter_type_val, mode_bytes, channels = struct.unpack(
         TRANSFORM_META_FORMAT, data[:TRANSFORM_META_SIZE]
     )
-    original_mode = mode_bytes.decode("ascii").rstrip("\x00")
-    return bool(has_sg), ftype, original_mode, channels
+    if marker != PY_ENGINE_MARKER:
+        raise ValueError(f"Invalid pure Python engine marker: {marker!r}")
+
+    original_mode = mode_bytes.rstrip(b"\x00").decode("ascii", errors="replace")
+    return bool(has_sg), filter_type_val, original_mode, channels
 
 
 # ==============================================================================
@@ -320,53 +319,86 @@ def parse_transform_metadata(data: bytes) -> Tuple[bool, int, str, int]:
 
 class WebPLosslessCompressor:
     """
-    Main image compressor using the WebP Lossless algorithm.
-    Pipeline: Subtract Green → Spatial Filter → LZ77 → Huffman → RIFF/VP8L container.
+    WebP Lossless Image Compressor.
+    Supports both standard LibWebP (default) and Pure Python educational mode.
     """
 
     def __init__(
         self,
         filter_type: FilterType = FilterType.ADAPTIVE,
         use_subtract_green: bool = True,
+        use_pure_python: bool = False,
+        quality: int = 100,
     ):
         """
-        Initialize the WebP Lossless compressor.
+        Initialize the compressor.
 
         Args:
-            filter_type: Spatial prediction filter type
-                         (NONE, SUB, UP, AVERAGE, PAETH, ADAPTIVE).
-            use_subtract_green: If True, apply Subtract Green Transform before filtering.
-                                This reduces color correlation and improves compression.
+            filter_type: Spatial prediction filter (ADAPTIVE, NONE, SUB, UP, AVERAGE, PAETH).
+                         Only used in pure Python mode.
+            use_subtract_green: Apply Subtract Green Transform (color decorrelation).
+                                Only used in pure Python mode.
+            use_pure_python: If False (default), uses fast C-accelerated Google libwebp (Pillow).
+                             If True, uses modular pure Python pipeline (LZ77 + Canonical Huffman).
+            quality: Compression effort/quality level for libwebp (0 to 100). Default is 100.
         """
         self.filter_type = filter_type
         self.use_subtract_green = use_subtract_green
+        self.use_pure_python = use_pure_python
+        self.quality = quality
 
     # --------------------------------------------------------------------------
-    # CORE COMPRESSION PIPELINE
+    # IMAGE COMPRESSION PIPELINE
     # --------------------------------------------------------------------------
     def compress(self, image_input: Union[str, Image.Image, np.ndarray]) -> bytes:
         """
-        Compress an image into WebP Lossless binary format (.webp).
+        Compress an image into WebP Lossless (.webp) format.
 
-        Full pipeline:
-        1. Load image → convert to RGBA (4 channels)
-        2. Subtract Green Transform (reduce inter-channel correlation)
-        3. Spatial prediction filtering (reduce 2D spatial correlation)
-        4. LZ77 sliding window dictionary compression
-        5. Huffman entropy encoding
-        6. Pack into VP8L bitstream
-        7. Wrap in RIFF WebP container
+        When use_pure_python is False (default):
+            Uses Google's libwebp via Pillow (lossless=True).
+            Generates standard, fully compatible .webp files.
+
+        When use_pure_python is True:
+            1. Load image and convert to RGBA pixels.
+            2. Subtract Green Transform (decorrelate R/B from G).
+            3. Spatial prediction filtering (scanlines).
+            4. LZ77 sliding window dictionary coding.
+            5. WebP Canonical Huffman coding (LSB-first bitstream).
+            6. Pack into RIFF WebP container with VP8L chunk.
 
         Args:
             image_input: File path (str), PIL Image, or numpy array.
         Returns:
-            bytes: Compressed data in RIFF/WebP/VP8L format.
+            bytes: Compressed data in .webp format.
         """
+        if not self.use_pure_python:
+            return self._compress_libwebp(image_input)
+        else:
+            return self._compress_pure_python(image_input)
+
+    def _compress_libwebp(self, image_input: Union[str, Image.Image, np.ndarray]) -> bytes:
+        """Compress image using Google libwebp via Pillow (standard compliant)."""
+        if isinstance(image_input, Image.Image):
+            img = image_input
+        elif isinstance(image_input, str):
+            img = Image.open(image_input)
+        elif isinstance(image_input, np.ndarray):
+            raw_bytes, width, height, channels, mode = load_image(image_input)
+            img = raw_bytes_to_image(raw_bytes, width, height, mode)
+        else:
+            raise TypeError(f"Unsupported image input type: {type(image_input)}")
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="WEBP", lossless=True, exact=True, quality=self.quality)
+        return buffer.getvalue()
+
+    def _compress_pure_python(self, image_input: Union[str, Image.Image, np.ndarray]) -> bytes:
+        """Compress image using pure Python modular pipeline."""
         # Step 1: Load image and flatten pixels into 1D bytes
         raw_bytes, width, height, channels, mode = load_image(image_input)
         original_mode = mode
 
-        # Convert to RGBA — WebP Lossless internally works on RGBA pixels
+        # Convert to RGBA - WebP Lossless internally works on RGBA pixels
         if mode != "RGBA":
             img = raw_bytes_to_image(raw_bytes, width, height, mode)
             img = img.convert("RGBA")
@@ -374,7 +406,7 @@ class WebPLosslessCompressor:
             channels = 4
             mode = "RGBA"
 
-        has_alpha = True  # RGBA always has alpha channel
+        has_alpha = True
 
         # Step 2: Subtract Green Transform (WebP-specific color decorrelation)
         if self.use_subtract_green:
@@ -391,8 +423,8 @@ class WebPLosslessCompressor:
         # Step 4: LZ77 sliding window dictionary compression
         lz77_bytes = lz77_encode(filtered_bytes)
 
-        # Step 5: Huffman entropy coding on top of LZ77 output
-        compressed_payload = huffman_encode(lz77_bytes)
+        # Step 5: WebP Canonical Huffman entropy coding on top of LZ77 output
+        compressed_payload = huffman_webp_encode(lz77_bytes)
 
         # Step 6: Assemble VP8L bitstream (header + metadata + payload)
         vp8l_header = pack_vp8l_header(width, height, has_alpha)
@@ -405,9 +437,7 @@ class WebPLosslessCompressor:
         vp8l_chunk_data = vp8l_header + transform_meta + compressed_payload
 
         # Step 7: Wrap in RIFF WebP container
-        webp_bytes = pack_riff_webp(vp8l_chunk_data)
-
-        return webp_bytes
+        return pack_riff_webp(vp8l_chunk_data)
 
     # --------------------------------------------------------------------------
     # FILE-LEVEL COMPRESSION
@@ -442,6 +472,7 @@ class WebPLosslessCompressor:
             "compression_ratio": cr,
             "space_saving_pct": space_saving,
             "compression_time_sec": compress_time,
+            "engine": "pure_python" if self.use_pure_python else "libwebp",
         }
 
 
@@ -454,8 +485,9 @@ def benchmark_webp_lossless(
 ) -> Dict[str, Union[float, int, bool, str]]:
     """
     Run full performance evaluation comparing:
-    1. WebP Lossless WITHOUT Subtract Green Transform
-    2. WebP Lossless WITH Subtract Green Transform (full pipeline)
+    1. Standard LibWebP (C-accelerated, standard .webp)
+    2. Pure Python WebP WITH Subtract Green Transform
+    3. Pure Python WebP WITHOUT Subtract Green Transform
     Includes bit-for-bit lossless check, MSE, PSNR, CR, BPP, and speed.
 
     Args:
@@ -463,60 +495,67 @@ def benchmark_webp_lossless(
     Returns:
         dict: Comprehensive benchmark metrics.
     """
-    # Import decompressor here to avoid circular import
     from .decompressor import WebPLosslessDecompressor
 
-    # Load image for benchmark
     raw_bytes, width, height, channels, mode = load_image(image_input)
     raw_size = len(raw_bytes)
     img_orig = raw_bytes_to_image(raw_bytes, width, height, mode)
 
-    # 1. Mode 1: Without Subtract Green
-    comp_no_sg = WebPLosslessCompressor(
-        filter_type=FilterType.ADAPTIVE, use_subtract_green=False
-    )
+    # 1. Mode 1: Standard LibWebP
+    comp_libwebp = WebPLosslessCompressor(use_pure_python=False)
     t0 = time.perf_counter()
-    bytes_no_sg = comp_no_sg.compress(img_orig)
-    t_comp_no_sg = time.perf_counter() - t0
+    bytes_libwebp = comp_libwebp.compress(img_orig)
+    t_comp_libwebp = time.perf_counter() - t0
 
-    # 2. Mode 2: With Subtract Green (full pipeline)
-    comp_with_sg = WebPLosslessCompressor(
-        filter_type=FilterType.ADAPTIVE, use_subtract_green=True
+    decomp = WebPLosslessDecompressor()
+    t_d0 = time.perf_counter()
+    img_rec_libwebp = decomp.decompress(bytes_libwebp)
+    t_decomp_libwebp = time.perf_counter() - t_d0
+    is_lossless_libwebp, mse_lib, psnr_lib = calculate_image_metrics(img_orig, img_rec_libwebp)
+
+    # 2. Mode 2: Pure Python WITH Subtract Green
+    comp_py_sg = WebPLosslessCompressor(
+        use_pure_python=True, filter_type=FilterType.ADAPTIVE, use_subtract_green=True
     )
     t1 = time.perf_counter()
-    bytes_with_sg = comp_with_sg.compress(img_orig)
-    t_comp_with_sg = time.perf_counter() - t1
+    bytes_py_sg = comp_py_sg.compress(img_orig)
+    t_comp_py_sg = time.perf_counter() - t1
 
-    # 3. Decompress and verify quality
-    decomp = WebPLosslessDecompressor()
+    t_d1 = time.perf_counter()
+    img_rec_py_sg = decomp.decompress(bytes_py_sg)
+    t_decomp_py_sg = time.perf_counter() - t_d1
+    is_lossless_py, mse_py, psnr_py = calculate_image_metrics(img_orig, img_rec_py_sg)
+
+    # 3. Mode 3: Pure Python WITHOUT Subtract Green
+    comp_py_nosg = WebPLosslessCompressor(
+        use_pure_python=True, filter_type=FilterType.ADAPTIVE, use_subtract_green=False
+    )
     t2 = time.perf_counter()
-    img_rec = decomp.decompress(bytes_with_sg)
-    t_decomp = time.perf_counter() - t2
+    bytes_py_nosg = comp_py_nosg.compress(img_orig)
+    t_comp_py_nosg = time.perf_counter() - t2
 
-    # Verify bit-for-bit match and calculate MSE/PSNR
-    is_bit_identical, mse, psnr_db = calculate_image_metrics(img_orig, img_rec)
-
-    size_no_sg = len(bytes_no_sg)
-    size_with_sg = len(bytes_with_sg)
-    cr_no_sg = raw_size / size_no_sg if size_no_sg > 0 else 0
-    cr_with_sg = raw_size / size_with_sg if size_with_sg > 0 else 0
-    bpp = (size_with_sg * 8) / (width * height)
-    saving = (1.0 - size_with_sg / raw_size) * 100.0
+    size_lib = len(bytes_libwebp)
+    size_py_sg = len(bytes_py_sg)
+    size_py_nosg = len(bytes_py_nosg)
 
     return {
         "dimensions": f"{width}x{height}",
         "raw_pixel_bytes": raw_size,
-        "no_subtract_green_bytes": size_no_sg,
-        "no_subtract_green_cr": cr_no_sg,
-        "with_subtract_green_bytes": size_with_sg,
-        "with_subtract_green_cr": cr_with_sg,
-        "space_saving_pct": saving,
-        "bits_per_pixel": bpp,
-        "compress_time_sec": t_comp_with_sg,
-        "decompress_time_sec": t_decomp,
-        "is_lossless": is_bit_identical,
-        "mse": mse,
-        "psnr_db": psnr_db,
+        # LibWebP
+        "libwebp_bytes": size_lib,
+        "libwebp_cr": raw_size / size_lib if size_lib > 0 else 0,
+        "libwebp_compress_time": t_comp_libwebp,
+        "libwebp_decompress_time": t_decomp_libwebp,
+        "libwebp_lossless": is_lossless_libwebp,
+        # Pure Python with SG
+        "py_with_sg_bytes": size_py_sg,
+        "py_with_sg_cr": raw_size / size_py_sg if size_py_sg > 0 else 0,
+        "py_with_sg_time": t_comp_py_sg,
+        "py_with_sg_lossless": is_lossless_py,
+        # Pure Python without SG
+        "py_no_sg_bytes": size_py_nosg,
+        "py_no_sg_cr": raw_size / size_py_nosg if size_py_nosg > 0 else 0,
+        "py_no_sg_time": t_comp_py_nosg,
     }
 
 
@@ -527,11 +566,14 @@ def benchmark_webp_lossless(
 def compress_image_webp_lossless(
     input_path: str,
     output_path: str,
+    use_pure_python: bool = False,
     filter_type: FilterType = FilterType.ADAPTIVE,
     use_subtract_green: bool = True,
 ):
     """Convenience helper function to compress an image file to .webp"""
     c = WebPLosslessCompressor(
-        filter_type=filter_type, use_subtract_green=use_subtract_green
+        use_pure_python=use_pure_python,
+        filter_type=filter_type,
+        use_subtract_green=use_subtract_green,
     )
     return c.compress_file(input_path, output_path)

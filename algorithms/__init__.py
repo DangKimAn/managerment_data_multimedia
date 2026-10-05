@@ -56,9 +56,11 @@ from .webp_lossless import (
     # WebP Lossless Decompressor
     WebPLosslessDecompressor,
     decompress_image_webp_lossless,
-    # WebP Lossless Transforms
     apply_subtract_green,
     inverse_subtract_green,
+    # WebP Canonical Huffman
+    huffman_webp_encode,
+    huffman_webp_decode,
 )
 
 __all__ = [
@@ -98,4 +100,7 @@ __all__ = [
     # WebP Lossless Transforms
     "apply_subtract_green",
     "inverse_subtract_green",
+    # WebP Canonical Huffman
+    "huffman_webp_encode",
+    "huffman_webp_decode",
 ]
