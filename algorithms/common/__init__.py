@@ -32,6 +32,14 @@ from .huffman import (
     huffman_encode,
     huffman_decode
 )
+from .huffman_webp import (
+    huffman_webp_encode,
+    huffman_webp_decode,
+    build_canonical_codes,
+    compute_code_lengths,
+    LsbBitWriter,
+    LsbBitReader,
+)
 
 __all__ = [
     # Image utilities
@@ -55,4 +63,11 @@ __all__ = [
     "build_codes",
     "huffman_encode",
     "huffman_decode",
+    # WebP Canonical Huffman
+    "huffman_webp_encode",
+    "huffman_webp_decode",
+    "build_canonical_codes",
+    "compute_code_lengths",
+    "LsbBitWriter",
+    "LsbBitReader",
 ]
