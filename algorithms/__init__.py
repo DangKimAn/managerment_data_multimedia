@@ -47,6 +47,11 @@ from .deflate import (
     decompress_image_deflate,
     benchmark_image_compression,
 )
+from .tiff_lzw import (
+    TiffLzwCompressor,
+    compress_image_tiff_lzw,
+    decompress_image_tiff_lzw,
+)
 
 from .webp_lossless import (
     # WebP Lossless Compressor
@@ -103,4 +108,8 @@ __all__ = [
     # WebP Canonical Huffman
     "huffman_webp_encode",
     "huffman_webp_decode",
+    # TIFF-LZW Compressor
+    "TiffLzwCompressor",
+    "compress_image_tiff_lzw",
+    "decompress_image_tiff_lzw",
 ]
