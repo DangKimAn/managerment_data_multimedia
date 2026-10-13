@@ -34,8 +34,8 @@ from s3_benchmark import (  # noqa: E402
 )
 
 
-DEFAULT_TOTAL_RUNS = int(os.getenv("TOTAL_RUNS", 5))
 DEFAULT_IMAGES_PER_GROUP = int(os.getenv("IMAGES_PER_GROUP", 100))
+DEFAULT_TIMING_REPEATS   = int(os.getenv("TIMING_REPEATS", 5))   # Số lần đo timing mỗi ảnh
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 AVAILABLE_ALGORITHMS = (
     "deflate",
@@ -46,64 +46,54 @@ AVAILABLE_ALGORITHMS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark DEFLATE, TIFF-LZW, and WebP Lossless on the same S3 images."
+        description="Benchmark DEFLATE, TIFF-LZW, và WebP Lossless trên cùng ảnh S3."
     )
     parser.add_argument(
-        "--algo",
-        "-a",
+        "--algo", "-a",
         choices=(*AVAILABLE_ALGORITHMS, "all"),
         default="all",
-        help="Codec to benchmark, or 'all' to run every available codec.",
+        help="Codec cần benchmark, hoặc 'all' để chạy tất cả.",
     )
     parser.add_argument(
-        "--total-runs",
-        "-r",
+        "--repeat", "-n",
         type=int,
-        default=DEFAULT_TOTAL_RUNS,
-        help=f"Number of benchmark runs (default: {DEFAULT_TOTAL_RUNS}).",
+        default=DEFAULT_TIMING_REPEATS,
+        help=f"Số lần nén/giải nén mỗi ảnh để lấy thời gian trung bình (default: {DEFAULT_TIMING_REPEATS}).",
     )
     parser.add_argument(
-        "--repeat",
-        "-n",
-        type=int,
-        default=1,
-        help="Compression/decompression repetitions per image (default: 1).",
-    )
-    parser.add_argument(
-        "--limit",
-        "-l",
+        "--limit", "-l",
         type=int,
         default=DEFAULT_IMAGES_PER_GROUP,
-        help=f"Maximum images loaded from each S3 group (default: {DEFAULT_IMAGES_PER_GROUP}).",
+        help=f"Số ảnh tối đa tải từ mỗi nhóm S3 (default: {DEFAULT_IMAGES_PER_GROUP}).",
     )
     parser.add_argument(
-        "--workers",
-        "-w",
+        "--workers", "-w",
         type=int,
         default=1,
-        help="Reserved for future parallel mode; fair benchmark mode is sequential.",
+        help="Dự phòng cho chế độ song song; hiện tại benchmark chạy tuần tự.",
     )
     parser.add_argument(
-        "--filter",
-        "-f",
+        "--filter", "-f",
         choices=["NONE", "SUB", "UP", "AVERAGE", "PAETH", "ADAPTIVE"],
         default="ADAPTIVE",
-        help="Spatial prediction filter used only by DEFLATE.",
+        help="Spatial filter (chỉ dùng khi --no-pillow).",
+    )
+    parser.add_argument(
+        "--no-pillow",
+        action="store_true",
+        help="Dùng pipeline học thuật (spatial filter + zlib/Python) thay vì Pillow PNG.",
     )
     parser.add_argument(
         "--pure-python",
         action="store_true",
-        help="Use the educational Python LZ77 + Huffman DEFLATE engine.",
+        help="Dùng LZ77 + Huffman Python thuần (chỉ tác dụng khi --no-pillow).",
     )
-    args = parser.parse_args()
 
-    if args.total_runs < 1:
-        parser.error("--total-runs must be at least 1")
+    args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
     if args.limit < 1:
         parser.error("--limit must be at least 1")
-
     return args
 
 
@@ -111,18 +101,21 @@ CodecFunctions = Tuple[Callable, Callable, str]
 
 
 def build_codecs(args: argparse.Namespace) -> Dict[str, CodecFunctions]:
-    """Build selected codecs and their compressed-file extensions."""
+    """Khởi tạo các codec được chọn."""
     selected = AVAILABLE_ALGORITHMS if args.algo == "all" else (args.algo,)
     codecs: Dict[str, CodecFunctions] = {}
 
     for name in selected:
         if name == "deflate":
+            use_pillow = not args.no_pillow
+            file_ext = ".png" if use_pillow else ".defimg"
             codec = DeflateImageCompressor(
                 compression_level=9,
                 filter_type=FilterType[args.filter],
                 use_pure_python=args.pure_python,
+                use_pillow=use_pillow,
             )
-            codecs[name] = (codec.compress, codec.decompress, ".defimg")
+            codecs[name] = (codec.compress, codec.decompress, file_ext)
         elif name == "tiff_lzw":
             codec = TiffLzwCompressor()
             codecs[name] = (codec.compress, codec.decompress, ".tiff")
@@ -146,47 +139,44 @@ def main() -> None:
     print("=" * 80)
     print(f"Environment:       {ENVIRONMENT.upper()}")
     print(f"Algorithms:        {', '.join(codecs)}")
-    print(f"Total runs:        {args.total_runs}")
     print(f"Images per group:  {args.limit}")
-    print(f"Timing repeats:    {args.repeat}")
+    print(f"Timing repeats:    {args.repeat}  (mỗi ảnh nén/giải nén {args.repeat} lần → lấy trung bình)")
     if "deflate" in codecs:
-        print(f"DEFLATE filter:    {args.filter}")
-        print(f"DEFLATE engine:    {'Pure Python' if args.pure_python else 'zlib'}")
+        use_pillow = not args.no_pillow
+        if use_pillow:
+            print(f"DEFLATE engine:    Pillow PNG / libpng + zlib (benchmark chính)")
+        else:
+            engine = "LZ77+Huffman Python" if args.pure_python else "zlib"
+            print(f"DEFLATE engine:    {engine} + spatial filter [{args.filter}] (học thuật)")
     print("=" * 80)
 
-    for run_id in range(1, args.total_runs + 1):
-        if len(codecs) > 1:
-            print(f"\nRun {run_id}/{args.total_runs}: ALL CODECS PER IMAGE")
-            run_multi_codec_benchmark_pipeline(
-                codecs=codecs,
-                run_id=run_id,
-                num_runs=args.repeat,
-                limit_files=args.limit,
-                max_workers=args.workers,
-            )
-            continue
-
-        for algo_name, (compress_fn, decompress_fn, file_extension) in codecs.items():
-            print(f"\nRun {run_id}/{args.total_runs}: {algo_name.upper()}")
-            run_s3_benchmark_pipeline(
-                compress_fn=compress_fn,
-                decompress_fn=decompress_fn,
-                algo_name=algo_name,
-                file_extension=file_extension,
-                run_id=run_id,
-                num_runs=args.repeat,
-                limit_files=args.limit,
-                max_workers=args.workers,
-            )
-
-    runs = " ".join(str(run_id) for run_id in range(1, args.total_runs + 1))
-    algo_names = " ".join(codecs)
-    print("\nBenchmark complete.")
     if len(codecs) > 1:
-        print(f"Generate comparison charts with:\n  python plot_reports.py --algos {algo_names} --runs {runs}")
+        print("\nBenchmark: TẤT CẢ CODEC TRÊN TỪNG ẢNH")
+        run_multi_codec_benchmark_pipeline(
+            codecs=codecs,
+            num_runs=args.repeat,
+            limit_files=args.limit,
+            max_workers=args.workers,
+        )
     else:
-        algo_name = next(iter(codecs))
-        print(f"Generate charts with:\n  python plot_reports.py --algo {algo_name} --runs {runs}")
+        algo_name, (compress_fn, decompress_fn, file_extension) = next(iter(codecs.items()))
+        print(f"\nBenchmark: {algo_name.upper()}")
+        run_s3_benchmark_pipeline(
+            compress_fn=compress_fn,
+            decompress_fn=decompress_fn,
+            algo_name=algo_name,
+            file_extension=file_extension,
+            num_runs=args.repeat,
+            limit_files=args.limit,
+            max_workers=args.workers,
+        )
+
+    algo_names = " ".join(codecs)
+    print("\nBenchmark hoàn tất.")
+    if len(codecs) > 1:
+        print(f"Xem biểu đồ:\n  python plot_reports.py --algos {algo_names}")
+    else:
+        print(f"Xem biểu đồ:\n  python plot_reports.py --algo {algo_names}")
 
 
 if __name__ == "__main__":

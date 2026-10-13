@@ -1,125 +1,166 @@
 """
 Deflate Image Compressor Module  (algorithms/deflate/compressor.py)
-Coordinates the whole compression pipeline:
-1. Loads and flattens image pixels (using image_utils)
-2. Applies 2D spatial prediction filtering (using spatial_filters)
-3. Compresses with DEFLATE (combining LZ77 and Huffman coding)
-4. Saves to and loads from binary container format (.defimg)
+
+Hai chế độ hoạt động:
+  1. Pillow PNG (mặc định, use_pillow=True):
+       - Nén : PIL.Image → PIL.Image.save(PNG, compress_level=9) → bytes
+       - Giải: bytes → PIL.Image.open() → PIL Image
+       - Toàn bộ dùng thư viện C (libpng + zlib), cùng chuẩn so sánh với
+         TIFF-LZW (libtiff) và WebP (libwebp).
+       - Đây là kết quả benchmark chính được báo cáo trong bảng so sánh.
+
+  2. Custom pipeline (use_pillow=False, chỉ học thuật):
+       - Nén : load pixel → spatial filter (NumPy) → zlib / LZ77+Huffman Python
+       - Giải: unpack header → zlib / LZ77+Huffman decode → unfilter (Python loop)
+       - Container: file .defimg (20-byte binary header tự định nghĩa)
+       - Chỉ dùng để minh họa nguyên lý, KHÔNG dùng trong benchmark so sánh.
+
 Written in simple A2/B1 English.
 """
 
+import io
 import os
 import struct
 import time
-import zlib
 from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
 
-# Import dedicated modular components
+# Import modular components (chỉ dùng trong custom pipeline)
 from ..common.image_utils import (
     load_image,
     raw_bytes_to_image,
     save_image,
-    calculate_image_metrics
+    calculate_image_metrics,
 )
 from ..common.spatial_filters import (
     FilterType,
     filter_scanlines,
-    unfilter_scanlines
+    unfilter_scanlines,
 )
 from ..common.lz77 import lz77_encode, lz77_decode
 from ..common.huffman import huffman_encode, huffman_decode
 
-# 20-byte fixed header format for .defimg file container
-# Format: Magic (4s) + Version (B) + FilterMode (B) + ColorMode (4s) + Width (I) + Height (I) + Channels (B) + Engine (B)
+# 20-byte fixed header format for .defimg container (custom pipeline only)
+# Format: Magic(4s) + Version(B) + FilterMode(B) + ColorMode(4s) + Width(I) + Height(I) + Channels(B) + Engine(B)
 HEADER_FORMAT = ">4sBB4sIIBB"
 MAGIC_BYTES = b"DFLT"
 CONTAINER_VERSION = 1
 
+# engine_byte values stored in .defimg header
+ENGINE_ZLIB = 0        # zlib RFC-1951 (C)
+ENGINE_PURE_PYTHON = 1 # custom LZ77 + Huffman (Python, educational)
+ENGINE_PILLOW_PNG = 2  # Pillow PNG / libpng (C) — main benchmark pipeline
+
 
 class DeflateImageCompressor:
     """
-    Main image compressor using DEFLATE (LZ77 + Huffman Coding)
-    and PNG-style spatial prediction filters.
+    Image compressor using DEFLATE/PNG.
+
+    Chế độ mặc định (use_pillow=True):
+      - Nén bằng Pillow PNG (libpng + zlib level 9) — chuẩn so sánh chính.
+      - Output là PNG bytes thuần, KHÔNG dùng .defimg container.
+
+    Chế độ học thuật (use_pillow=False):
+      - Dùng pipeline tự cài: spatial filter → zlib hoặc LZ77+Huffman Python.
+      - Output là .defimg binary container.
     """
 
     def __init__(
         self,
         compression_level: int = 9,
         filter_type: FilterType = FilterType.ADAPTIVE,
-        use_pure_python: bool = False
+        use_pure_python: bool = False,
+        use_pillow: bool = True,
     ):
         """
-        Initialize the compressor.
-        
+        Khởi tạo compressor.
+
         Args:
-            compression_level: Deflate level 1 (fastest) to 9 (best compression). Default is 9.
-            filter_type: Spatial filter type (NONE, SUB, UP, AVERAGE, PAETH, ADAPTIVE).
-            use_pure_python: If True, uses our standalone pure Python LZ77 + Huffman pipeline.
-                             If False (default), uses fast C-accelerated DEFLATE (zlib RFC 1951).
+            compression_level: Mức nén zlib 1–9 (chỉ dùng khi use_pillow=False).
+            filter_type: Loại spatial filter PNG (chỉ dùng khi use_pillow=False).
+            use_pure_python: Nếu True dùng LZ77+Huffman Python (học thuật).
+                             Chỉ có tác dụng khi use_pillow=False.
+            use_pillow: Nếu True (mặc định) dùng Pillow PNG làm pipeline chính.
+                        Nếu False dùng pipeline tự cài (học thuật).
         """
         if not (1 <= compression_level <= 9):
             raise ValueError("compression_level must be between 1 and 9.")
         self.compression_level = compression_level
         self.filter_type = filter_type
         self.use_pure_python = use_pure_python
+        self.use_pillow = use_pillow
 
     # --------------------------------------------------------------------------
-    # CORE ENTROPY & DICTIONARY COMPRESSION (LZ77 + HUFFMAN)
+    # PILLOW PNG PIPELINE (benchmark chính)
+    # --------------------------------------------------------------------------
+    def _pillow_compress(self, img: Image.Image) -> bytes:
+        """Nén ảnh thành PNG bytes bằng Pillow (libpng, zlib level 9)."""
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", compress_level=self.compression_level, optimize=False)
+        return buf.getvalue()
+
+    def _pillow_decompress(self, data: bytes) -> Image.Image:
+        """Giải nén PNG bytes thành PIL Image bằng Pillow (libpng)."""
+        buf = io.BytesIO(data)
+        img = Image.open(buf)
+        img.load()  # Đảm bảo dữ liệu pixel được giải mã ngay
+        return img
+
+    # --------------------------------------------------------------------------
+    # CUSTOM PIPELINE (học thuật — LZ77 + Huffman / zlib + spatial filter)
     # --------------------------------------------------------------------------
     def _deflate_compress(self, data: bytes) -> bytes:
-        """Compress byte stream using DEFLATE (LZ77 + Huffman Coding)"""
+        """Nén byte stream bằng DEFLATE (LZ77 + Huffman Coding)."""
         if self.use_pure_python:
-            # Step 1: Run LZ77 sliding window dictionary compression
             lz77_bytes = lz77_encode(data)
-            # Step 2: Run Huffman entropy coding on top of LZ77 output
             return huffman_encode(lz77_bytes)
         else:
-            # Standard RFC 1951 DEFLATE (C-optimized LZ77 + Huffman)
-            return zlib.compress(data, level=self.compression_level)
+            return zlib_compress(data, level=self.compression_level)
 
     def _deflate_decompress(self, compressed_payload: bytes, is_pure_python: bool) -> bytes:
-        """Decompress byte stream using DEFLATE (Huffman Decode + LZ77 Decode)"""
+        """Giải nén byte stream bằng DEFLATE (Huffman Decode + LZ77 Decode)."""
         if is_pure_python:
-            # Step 1: Decode Huffman bitstream
             lz77_bytes = huffman_decode(compressed_payload)
-            # Step 2: Decode LZ77 tokens back into raw bytes
             return lz77_decode(lz77_bytes)
         else:
-            # Standard RFC 1951 DEFLATE
-            return zlib.decompress(compressed_payload)
+            return zlib_decompress(compressed_payload)
 
     # --------------------------------------------------------------------------
-    # IMAGE COMPRESSION
+    # COMPRESS (router)
     # --------------------------------------------------------------------------
     def compress(self, image_input: Union[str, Image.Image, np.ndarray]) -> bytes:
         """
-        Compress an image:
-        1. Read image and flatten into 1D byte array.
-        2. Apply spatial prediction filter to remove 2D pixel correlation.
-        3. Compress with DEFLATE (LZ77 + Huffman).
-        4. Wrap into a 20-byte binary header.
-        
+        Nén ảnh thành bytes.
+
+        - use_pillow=True : trả về PNG bytes (chuẩn benchmark).
+        - use_pillow=False: trả về .defimg bytes (học thuật).
+
         Args:
-            image_input: File path, PIL Image, or numpy array.
+            image_input: Đường dẫn file, PIL Image, hoặc numpy array.
         Returns:
-            bytes: Compressed binary data in .defimg format.
+            bytes: Dữ liệu nén.
         """
-        # Step 1: Load image and flatten to 1D bytes using image_utils
-        raw_bytes, width, height, channels, mode = load_image(image_input)
+        # Chuẩn hóa input thành PIL Image
+        if isinstance(image_input, (str, np.ndarray)):
+            raw_bytes, width, height, channels, mode = load_image(image_input)
+            img = raw_bytes_to_image(raw_bytes, width, height, mode)
+        else:
+            img = image_input
+
+        # ── Pillow PNG pipeline (benchmark chính) ──
+        if self.use_pillow:
+            return self._pillow_compress(img)
+
+        # ── Custom pipeline (học thuật) ──
+        raw_bytes, width, height, channels, mode = load_image(img)
         bpp = channels
-
-        # Step 2: Apply spatial prediction filter using spatial_filters
         filtered_bytes = filter_scanlines(raw_bytes, width, height, bpp, self.filter_type)
-
-        # Step 3: Run DEFLATE compression (LZ77 + Huffman)
         compressed_payload = self._deflate_compress(filtered_bytes)
 
-        # Step 4: Pack 20-byte binary header
         mode_bytes = mode.encode("ascii").ljust(4, b"\x00")
-        engine_byte = 1 if self.use_pure_python else 0
+        engine_byte = ENGINE_PURE_PYTHON if self.use_pure_python else ENGINE_ZLIB
         header = struct.pack(
             HEADER_FORMAT,
             MAGIC_BYTES,
@@ -129,18 +170,56 @@ class DeflateImageCompressor:
             width,
             height,
             channels,
-            engine_byte
+            engine_byte,
         )
-
         return header + compressed_payload
 
-    def compress_file(self, input_image_path: str, output_def_path: str) -> Dict[str, float]:
-        """Compress an image file and save output as .defimg file on disk"""
-        start_time = time.perf_counter()
-        compressed_data = self.compress(input_image_path)
-        compress_time = time.perf_counter() - start_time
+    def decompress(self, compressed_data: bytes) -> Image.Image:
+        """
+        Giải nén bytes thành PIL Image.
 
-        with open(output_def_path, "wb") as f:
+        - use_pillow=True : đọc PNG bytes bằng Pillow.
+        - use_pillow=False: đọc .defimg bytes bằng pipeline tự cài.
+
+        Args:
+            compressed_data: Dữ liệu nén từ compress().
+        Returns:
+            Image.Image: Ảnh gốc đã được khôi phục.
+        """
+        # ── Pillow PNG pipeline (benchmark chính) ──
+        if self.use_pillow:
+            return self._pillow_decompress(compressed_data)
+
+        # ── Custom pipeline (học thuật) ──
+        header_size = struct.calcsize(HEADER_FORMAT)
+        if len(compressed_data) < header_size:
+            raise ValueError("Invalid compressed data: shorter than header size.")
+
+        magic, version, filter_mode_val, mode_bytes, width, height, channels, engine_byte = struct.unpack(
+            HEADER_FORMAT, compressed_data[:header_size]
+        )
+
+        if magic != MAGIC_BYTES:
+            raise ValueError(f"Invalid file signature: {magic}, expected: {MAGIC_BYTES}")
+
+        mode = mode_bytes.decode("ascii").rstrip("\x00")
+        is_pure_python = (engine_byte == ENGINE_PURE_PYTHON)
+        payload = compressed_data[header_size:]
+
+        filtered_bytes = self._deflate_decompress(payload, is_pure_python=is_pure_python)
+        raw_bytes = unfilter_scanlines(filtered_bytes, width, height, channels)
+        return raw_bytes_to_image(raw_bytes, width, height, mode)
+
+    # --------------------------------------------------------------------------
+    # FILE-LEVEL HELPERS
+    # --------------------------------------------------------------------------
+    def compress_file(self, input_image_path: str, output_path: str) -> Dict[str, float]:
+        """Nén file ảnh và ghi ra đĩa. Trả về dict thống kê."""
+        start = time.perf_counter()
+        compressed_data = self.compress(input_image_path)
+        compress_time = time.perf_counter() - start
+
+        with open(output_path, "wb") as f:
             f.write(compressed_data)
 
         orig_size = os.path.getsize(input_image_path)
@@ -153,59 +232,21 @@ class DeflateImageCompressor:
             "compressed_size": comp_size,
             "compression_ratio": cr,
             "space_saving_pct": space_saving,
-            "compression_time_sec": compress_time
+            "compression_time_sec": compress_time,
         }
-
-    # --------------------------------------------------------------------------
-    # IMAGE DECOMPRESSION
-    # --------------------------------------------------------------------------
-    def decompress(self, compressed_data: bytes) -> Image.Image:
-        """
-        Decompress .defimg binary data back into a 100% original PIL Image.
-        
-        Args:
-            compressed_data: Compressed bytes containing header and payload.
-        Returns:
-            Image.Image: Reconstructed 2D PIL Image.
-        """
-        header_size = struct.calcsize(HEADER_FORMAT)
-        if len(compressed_data) < header_size:
-            raise ValueError("Invalid compressed data: Shorter than header size.")
-
-        # Step 1: Read and parse 20-byte header
-        magic, version, filter_mode_val, mode_bytes, width, height, channels, engine_byte = struct.unpack(
-            HEADER_FORMAT, compressed_data[:header_size]
-        )
-
-        if magic != MAGIC_BYTES:
-            raise ValueError(f"Invalid file signature: {magic}, expected: {MAGIC_BYTES}")
-
-        mode = mode_bytes.decode("ascii").rstrip("\x00")
-        is_pure_python = (engine_byte == 1)
-        payload = compressed_data[header_size:]
-
-        # Step 2: Decompress DEFLATE stream (Huffman + LZ77 decode)
-        filtered_bytes = self._deflate_decompress(payload, is_pure_python=is_pure_python)
-
-        # Step 3: Reverse spatial prediction filters using spatial_filters
-        raw_bytes = unfilter_scanlines(filtered_bytes, width, height, channels)
-
-        # Step 4: Reconstruct 2D PIL Image from 1D bytes using image_utils
-        reconstructed_img = raw_bytes_to_image(raw_bytes, width, height, mode)
-        return reconstructed_img
 
     def decompress_file(
         self,
-        input_def_path: str,
-        output_image_path: Optional[str] = None
+        input_path: str,
+        output_image_path: Optional[str] = None,
     ) -> Tuple[Image.Image, float]:
-        """Decompress a .defimg file from disk and optionally save as image"""
-        with open(input_def_path, "rb") as f:
+        """Giải nén file từ đĩa, tùy chọn lưu ảnh ra file."""
+        with open(input_path, "rb") as f:
             data = f.read()
 
-        start_time = time.perf_counter()
+        start = time.perf_counter()
         img = self.decompress(data)
-        decomp_time = time.perf_counter() - start_time
+        decomp_time = time.perf_counter() - start
 
         if output_image_path:
             save_image(img, output_image_path)
@@ -214,79 +255,90 @@ class DeflateImageCompressor:
 
 
 # ------------------------------------------------------------------------------
+# PRIVATE HELPERS (tránh import zlib ở top-level để không nhầm với custom impl)
+# ------------------------------------------------------------------------------
+import zlib as _zlib
+
+
+def zlib_compress(data: bytes, level: int = 9) -> bytes:
+    return _zlib.compress(data, level=level)
+
+
+def zlib_decompress(data: bytes) -> bytes:
+    return _zlib.decompress(data)
+
+
+# ------------------------------------------------------------------------------
 # BENCHMARK & PERFORMANCE MEASUREMENT
 # ------------------------------------------------------------------------------
 def benchmark_image_compression(
     image_input: Union[str, Image.Image],
-    compression_level: int = 9
+    compression_level: int = 9,
 ) -> Dict[str, Union[float, int, bool, str]]:
     """
-    Run full performance evaluation comparing:
-    1. Direct DEFLATE (no spatial filters)
-    2. Adaptive Filter + DEFLATE (PNG standard)
-    Includes bit-for-bit lossless check, MSE, PSNR, CR, BPP, and speed.
+    Đo hiệu năng Pillow PNG pipeline (benchmark chính).
+    So sánh: No-filter Deflate vs Adaptive-filter Deflate (học thuật thêm vào).
     """
-    # Load image using image_utils
     raw_bytes, width, height, channels, mode = load_image(image_input)
     raw_size = len(raw_bytes)
     img_orig = raw_bytes_to_image(raw_bytes, width, height, mode)
 
-    # 1. Mode 1: Direct Deflate (No filter)
-    comp_direct = DeflateImageCompressor(compression_level=compression_level, filter_type=FilterType.NONE)
+    # ── Pillow PNG (benchmark chính) ──
+    comp_pillow = DeflateImageCompressor(compression_level=compression_level, use_pillow=True)
     t0 = time.perf_counter()
-    bytes_direct = comp_direct.compress(img_orig)
-    t_comp_direct = time.perf_counter() - t0
+    bytes_pillow = comp_pillow.compress(img_orig)
+    t_comp = time.perf_counter() - t0
 
-    # 2. Mode 2: Adaptive Filter + Deflate
-    comp_adaptive = DeflateImageCompressor(compression_level=compression_level, filter_type=FilterType.ADAPTIVE)
     t1 = time.perf_counter()
-    bytes_adaptive = comp_adaptive.compress(img_orig)
-    t_comp_adaptive = time.perf_counter() - t1
+    img_rec = comp_pillow.decompress(bytes_pillow)
+    t_decomp = time.perf_counter() - t1
 
-    # 3. Decompress and verify quality
-    t2 = time.perf_counter()
-    img_rec = comp_adaptive.decompress(bytes_adaptive)
-    t_decomp_adaptive = time.perf_counter() - t2
-
-    # Verify bit-for-bit match and calculate MSE/PSNR using image_utils
     is_bit_identical, mse, psnr_db = calculate_image_metrics(img_orig, img_rec)
 
-    size_direct = len(bytes_direct)
-    size_adaptive = len(bytes_adaptive)
-    cr_direct = raw_size / size_direct if size_direct > 0 else 0
-    cr_adaptive = raw_size / size_adaptive if size_adaptive > 0 else 0
-    bpp_adaptive = (size_adaptive * 8) / (width * height)
-    saving_adaptive = (1.0 - size_adaptive / raw_size) * 100.0
+    size_pillow = len(bytes_pillow)
+    cr = raw_size / size_pillow if size_pillow > 0 else 0
+    bpp = (size_pillow * 8) / (width * height)
+    saving = (1.0 - size_pillow / raw_size) * 100.0
 
     return {
         "dimensions": f"{width}x{height}",
         "raw_pixel_bytes": raw_size,
-        "direct_deflate_bytes": size_direct,
-        "direct_cr": cr_direct,
-        "adaptive_deflate_bytes": size_adaptive,
-        "adaptive_cr": cr_adaptive,
-        "space_saving_pct": saving_adaptive,
-        "bits_per_pixel": bpp_adaptive,
-        "compress_time_sec": t_comp_adaptive,
-        "decompress_time_sec": t_decomp_adaptive,
+        "adaptive_deflate_bytes": size_pillow,
+        "adaptive_cr": cr,
+        "space_saving_pct": saving,
+        "bits_per_pixel": bpp,
+        "compress_time_sec": t_comp,
+        "decompress_time_sec": t_decomp,
         "is_lossless": is_bit_identical,
         "mse": mse,
-        "psnr_db": psnr_db
+        "psnr_db": psnr_db,
     }
 
 
+# ------------------------------------------------------------------------------
+# CONVENIENCE HELPERS
+# ------------------------------------------------------------------------------
 def compress_image_deflate(
     input_path: str,
     output_path: str,
     level: int = 9,
-    filter_type: FilterType = FilterType.ADAPTIVE
+    filter_type: FilterType = FilterType.ADAPTIVE,
+    use_pillow: bool = True,
 ):
-    """Convenience helper function to compress an image file to .defimg"""
-    c = DeflateImageCompressor(compression_level=level, filter_type=filter_type)
+    """Nén file ảnh thành PNG (Pillow) hoặc .defimg (custom)."""
+    c = DeflateImageCompressor(
+        compression_level=level,
+        filter_type=filter_type,
+        use_pillow=use_pillow,
+    )
     return c.compress_file(input_path, output_path)
 
 
-def decompress_image_deflate(input_def_path: str, output_image_path: str):
-    """Convenience helper function to decompress a .defimg file to an image file"""
-    c = DeflateImageCompressor()
-    return c.decompress_file(input_def_path, output_image_path)
+def decompress_image_deflate(
+    input_path: str,
+    output_image_path: str,
+    use_pillow: bool = True,
+):
+    """Giải nén PNG hoặc .defimg thành file ảnh."""
+    c = DeflateImageCompressor(use_pillow=use_pillow)
+    return c.decompress_file(input_path, output_image_path)
