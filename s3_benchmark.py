@@ -24,7 +24,9 @@ from algorithms import (
     load_image,
     raw_bytes_to_image,
     save_image,
-    calculate_image_metrics
+    calculate_image_metrics,
+    calculate_entropy,
+    calculate_residual_entropy,
 )
 
 # Load environment variables from .env if present
@@ -164,9 +166,11 @@ def _process_single_image(
     orig_size = len(raw_bytes)
     del raw_bytes
 
-    # Tính pixel std dev — proxy cho entropy Shannon (nhiễu càng cao → std càng lớn → CR càng thấp)
-    arr_rgb = np.array(img, dtype=np.float32)
-    pixel_std = float(arr_rgb.std())
+    # Đo lường Shannon Entropy gốc (Zero-order) và Residual Entropy (sau bộ lọc Sub Predictor)
+    arr_rgb_u8 = np.array(img, dtype=np.uint8)
+    entropy_val = calculate_entropy(arr_rgb_u8)
+    residual_entropy_val = calculate_residual_entropy(arr_rgb_u8)
+    pixel_std = float(arr_rgb_u8.astype(np.float32).std())
 
     # Trích tên nhóm ảnh từ fname (vd: "1_Natural_Complex__000001.bmp" → "1_Natural_Complex")
     image_group = fname.split("__")[0] if "__" in fname else "unknown"
@@ -209,6 +213,8 @@ def _process_single_image(
         "avg_compress_time_sec": round(avg_comp, 4),
         "min_compress_time_sec": round(min_comp, 4),
         "compress_speed_mb_s": round(comp_speed, 2),
+        "entropy": round(entropy_val, 4),
+        "residual_entropy": round(residual_entropy_val, 4),
         "pixel_std": round(pixel_std, 4),
     }
 

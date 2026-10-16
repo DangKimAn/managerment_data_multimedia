@@ -1,0 +1,6 @@
+Run,N Images,Compression Ratio (x) Mean,Compression Ratio (x) Median,Compression Ratio (x) Std,Compression Ratio (x) Min,Compression Ratio (x) Max,Space Saving (%) Mean,Space Saving (%) Median,Space Saving (%) Std,Space Saving (%) Min,Space Saving (%) Max,BPP Mean,BPP Median,BPP Std,BPP Min,BPP Max,Compress Speed (MB/s) Mean,Compress Speed (MB/s) Median,Compress Speed (MB/s) Std,Compress Speed (MB/s) Min,Compress Speed (MB/s) Max,Decompress Speed (MB/s) Mean,Decompress Speed (MB/s) Median,Decompress Speed (MB/s) Std,Decompress Speed (MB/s) Min,Decompress Speed (MB/s) Max
+1,400,8.404,3.48,16.576,1.36,156.43,71.989,71.23,16.08,26.54,99.36,6.723,6.905,3.859,0.15,17.63,4.008,2.915,5.981,0.35,81.65,128.519,109.535,53.92,46.51,334.34
+2,14,2.975,2.74,0.927,1.95,5.62,63.964,63.49,8.923,48.77,82.2,8.648,8.76,2.142,4.27,12.29,2.666,2.53,0.517,1.86,3.52,91.096,92.395,17.692,55.84,123.7
+3,400,7.887,3.025,16.75,1.0,156.43,56.414,66.925,35.386,-0.02,99.36,10.461,7.935,8.492,0.15,24.0,3.629,3.045,4.597,0.34,62.95,107.643,95.575,40.164,44.55,284.07
+4,400,7.887,3.025,16.75,1.0,156.43,56.414,66.925,35.386,-0.02,99.36,10.461,7.935,8.492,0.15,24.0,3.629,3.045,4.597,0.34,62.95,107.643,95.575,40.164,44.55,284.07
+5,400,7.887,3.025,16.75,1.0,156.43,56.414,66.925,35.386,-0.02,99.36,10.461,7.935,8.492,0.15,24.0,3.629,3.045,4.597,0.34,62.95,107.643,95.575,40.164,44.55,284.07

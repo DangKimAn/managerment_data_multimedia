@@ -49,12 +49,21 @@ CHART_DPI = 200
 
 def _load_reports(base_input_dir: str, algo_name: str, run_id: int):
     """Load compression & decompression CSV for a given algo/run_id."""
+    # Thử tìm theo cấu trúc có run_id trước (cũ)
     report_dir = os.path.join(base_input_dir, algo_name, str(run_id), "compress", "report")
     comp_csv = os.path.join(report_dir, "compression_report.csv")
     decomp_csv = os.path.join(report_dir, "decompression_report.csv")
-    if not os.path.exists(comp_csv) or not os.path.exists(decomp_csv):
-        return None, None, report_dir
-    return pd.read_csv(comp_csv), pd.read_csv(decomp_csv), report_dir
+    if os.path.exists(comp_csv) and os.path.exists(decomp_csv):
+        return pd.read_csv(comp_csv), pd.read_csv(decomp_csv), report_dir
+
+    # Fallback: Cấu trúc trực tiếp mới (không chia theo run_id)
+    direct_dir = os.path.join(base_input_dir, algo_name, "compress", "report")
+    direct_comp = os.path.join(direct_dir, "compression_report.csv")
+    direct_decomp = os.path.join(direct_dir, "decompression_report.csv")
+    if os.path.exists(direct_comp) and os.path.exists(direct_decomp):
+        return pd.read_csv(direct_comp), pd.read_csv(direct_decomp), direct_dir
+
+    return None, None, report_dir
 
 
 def _load_all_runs(base_input_dir: str, algo_name: str, run_ids: list[int]):
@@ -358,23 +367,35 @@ def generate_benchmark_charts(
         generated_paths.append(p)
 
         # ----------------------------------------------------------------------
-        # CHART 10 (RQ1): Scatter — Pixel Std Dev (proxy entropy) vs CR
-        # Biến x: độ lệch chuẩn pixel (càng cao → ảnh càng nhiễu → entropy cao)
+        # ----------------------------------------------------------------------
+        # CHART 10 (RQ1): Scatter — Shannon Entropy / Residual Entropy vs CR
+        # Biến x: Residual Entropy / Shannon Entropy thật (bit/pixel)
         # Biến y: Compression Ratio (càng thấp khi entropy cao)
         # ----------------------------------------------------------------------
-        if "pixel_std" in df_rq1.columns:
+        entropy_col = None
+        if "residual_entropy" in df_rq1.columns:
+            entropy_col = "residual_entropy"
+            xlabel_text = "Residual Entropy (bit/pixel, sau bộ lọc Sub/Left)"
+        elif "entropy" in df_rq1.columns:
+            entropy_col = "entropy"
+            xlabel_text = "Zero-order Shannon Entropy (bit/pixel)"
+        elif "pixel_std" in df_rq1.columns:
+            entropy_col = "pixel_std"
+            xlabel_text = "Pixel Std Dev (Shannon Entropy Proxy)"
+
+        if entropy_col is not None:
             fig, ax = plt.subplots(figsize=(11, 7), dpi=CHART_DPI)
             for g in group_order:
                 sub = df_rq1[df_rq1["image_group"] == g]
                 ax.scatter(
-                    sub["pixel_std"], sub["compression_ratio"],
+                    sub[entropy_col], sub["compression_ratio"],
                     label=GROUP_LABELS.get(g, g),
                     color=GROUP_PALETTE.get(g, "#888888"),
                     alpha=0.55, s=30, edgecolors="none"
                 )
 
             # Đường xu hướng tổng thể (polynomial fit bậc 2)
-            x_all = df_rq1["pixel_std"].values
+            x_all = df_rq1[entropy_col].values
             y_all = df_rq1["compression_ratio"].values
             if len(x_all) > 10:
                 try:
@@ -387,11 +408,11 @@ def generate_benchmark_charts(
                     pass
 
             ax.set_title(
-                f"[RQ1] Image Entropy (Pixel Std Dev) vs Compression Ratio — {algo_name.upper()}\n"
-                "(Higher Std Dev → More Noise → Higher Entropy → Lower CR)",
+                f"[RQ1] Image Entropy vs Compression Ratio — {algo_name.upper()}\n"
+                "(Higher Entropy → Less Redundancy → Lower CR)",
                 fontsize=12, fontweight="bold"
             )
-            ax.set_xlabel("Pixel Std Dev (Shannon Entropy Proxy)")
+            ax.set_xlabel(xlabel_text)
             ax.set_ylabel("Compression Ratio (x)")
             ax.legend(title="Image Type", bbox_to_anchor=(1.01, 1), borderaxespad=0)
             plt.tight_layout()
@@ -732,6 +753,65 @@ def generate_comparison_charts(
     plt.tight_layout()
     fig.savefig(os.path.join(charts_dir, "5_speed_vs_compression_ratio.png"))
     plt.close(fig)
+
+    # --------------------------------------------------------------------------
+    # CHART 6 (RQ1 Comparison): Residual Entropy vs Compression Ratio
+    # Trục X: Residual Entropy (bit/pixel, sau bộ lọc Sub)
+    # Trục Y: Compression Ratio (x)
+    # --------------------------------------------------------------------------
+    entropy_col = None
+    if "residual_entropy" in comparison.columns:
+        entropy_col = "residual_entropy"
+        x_label = "Residual Entropy (bit/pixel, sau bộ lọc Sub/Left)"
+    elif "entropy" in comparison.columns:
+        entropy_col = "entropy"
+        x_label = "Zero-order Shannon Entropy (bit/pixel)"
+    elif "pixel_std" in comparison.columns:
+        entropy_col = "pixel_std"
+        x_label = "Pixel Std Dev (Entropy Proxy)"
+
+    if entropy_col:
+        fig, ax = plt.subplots(figsize=(12, 7), dpi=CHART_DPI)
+        sns.scatterplot(
+            data=comparison,
+            x=entropy_col,
+            y="compression_ratio",
+            hue="algorithm_label",
+            style="algorithm_label",
+            palette="Set2",
+            alpha=0.60,
+            s=40,
+            ax=ax,
+        )
+
+        # Đường giới hạn nén lý thuyết Shannon Limit: CR = 1.0x
+        ax.axhline(1.0, color="#d9534f", linestyle="--", linewidth=1.5, label="Shannon Limit (CR = 1.0x)")
+
+        # Đường xu hướng tiệm cận cho từng thuật toán (polynomial fit bậc 2)
+        for algo_lbl in comparison["algorithm_label"].unique():
+            sub = comparison[comparison["algorithm_label"] == algo_lbl]
+            x_vals = sub[entropy_col].values
+            y_vals = sub["compression_ratio"].values
+            if len(x_vals) > 10:
+                try:
+                    z = np.polyfit(x_vals, y_vals, 2)
+                    p_fit = np.poly1d(z)
+                    x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+                    ax.plot(x_grid, p_fit(x_grid), linewidth=2.0, alpha=0.85,
+                            label=f"Trend {algo_lbl}")
+                except Exception:
+                    pass
+
+        ax.set_title(
+            "Empirical Shannon Entropy Limit: Residual Entropy vs Compression Ratio",
+            fontsize=13, fontweight="bold"
+        )
+        ax.set_xlabel(x_label, fontsize=11)
+        ax.set_ylabel("Compression Ratio (x)", fontsize=11)
+        ax.legend(title="Algorithm / Limit", bbox_to_anchor=(1.01, 1), borderaxespad=0)
+        plt.tight_layout()
+        fig.savefig(os.path.join(charts_dir, "6_entropy_vs_compression_ratio.png"))
+        plt.close(fig)
 
     print(
         f"[+] Compared {len(merged_by_algorithm)} algorithms on "

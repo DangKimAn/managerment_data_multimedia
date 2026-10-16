@@ -11,7 +11,9 @@ from .image_utils import (
     load_image,
     raw_bytes_to_image,
     save_image,
-    calculate_image_metrics
+    calculate_image_metrics,
+    calculate_entropy,
+    calculate_residual_entropy,
 )
 from .spatial_filters import (
     FilterType,

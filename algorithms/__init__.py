@@ -25,6 +25,8 @@ from .deflate import (
     raw_bytes_to_image,
     save_image,
     calculate_image_metrics,
+    calculate_entropy,
+    calculate_residual_entropy,
     # Spatial filters
     FilterType,
     paeth_predictor,

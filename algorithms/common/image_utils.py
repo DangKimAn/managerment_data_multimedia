@@ -77,3 +77,33 @@ def calculate_image_metrics(img1: Image.Image, img2: Image.Image) -> Tuple[bool,
     psnr_db = float("inf") if mse == 0.0 else float(20 * np.log10(255.0 / np.sqrt(mse)))
 
     return is_lossless, mse, psnr_db
+
+
+def calculate_entropy(img_array: np.ndarray) -> float:
+    """
+    Tính Zero-order Shannon Entropy của ma trận ảnh (đơn vị: bit/pixel).
+    H(X) = - sum(p_i * log2(p_i))
+    """
+    _, counts = np.unique(img_array, return_counts=True)
+    probabilities = counts / counts.sum()
+    probabilities = probabilities[probabilities > 0]
+    return float(-np.sum(probabilities * np.log2(probabilities)))
+
+
+def calculate_residual_entropy(img_array: np.ndarray) -> float:
+    """
+    Tính Entropy sau khi áp dụng bộ dự đoán không gian đơn giản (Sub/Left Predictor).
+    Mô phỏng phép lọc PNG Sub filter: e(x, y) = (I(x, y) - I(x-1, y)) mod 256.
+    """
+    img_int = img_array.astype(np.int16)
+    residual = np.zeros_like(img_int)
+    if img_int.ndim == 3:
+        residual[:, 1:, :] = img_int[:, 1:, :] - img_int[:, :-1, :]
+        residual[:, 0, :] = img_int[:, 0, :]
+    else:
+        residual[:, 1:] = img_int[:, 1:] - img_int[:, :-1]
+        residual[:, 0] = img_int[:, 0]
+
+    residual_mod = (residual % 256).astype(np.uint8)
+    return calculate_entropy(residual_mod)
+
