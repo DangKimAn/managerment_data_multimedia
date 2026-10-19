@@ -5,6 +5,7 @@ import time
 import threading
 from io import BytesIO
 from PIL import Image
+import numpy as np
 import boto3
 from botocore.exceptions import ClientError
 from icrawler.storage import BaseStorage
@@ -212,6 +213,67 @@ def crawl_images_for_group_s3(group_name, keywords, target_images=TARGET_IMAGES_
     print(f"{'='*75}\n")
 
 
+def generate_true_noise_to_s3(
+    group_name: str = "3_Textures_Noisy",
+    target_images: int = TARGET_IMAGES_PER_GROUP,
+    width: int = 1280,
+    height: int = 720,
+    overwrite: bool = True
+) -> None:
+    """
+    Sinh ảnh nhiễu ngẫu nhiên toán học thuần túy (True Mathematical Noise) bằng NumPy
+    và đẩy trực tiếp lên S3 (không lưu file cục bộ).
+
+    Cơ sở khoa học (Shannon Source Coding Theorem):
+    - Mỗi byte pixel phân bố đều độc lập U(0, 255) => Entropy cực đại H(X) = 8.00 bpp.
+    - Tương quan không gian = 0 (Spatial correlation r = 0).
+    - Bộ lọc dự đoán PNG/WebP và từ điển LZ77/LZW hoàn toàn vô hiệu.
+    - Kết quả: Tỷ lệ nén tiệm cận chặt chẽ 1.00x, chứng minh giới hạn nén lý thuyết.
+    """
+    s3_prefix = f"{S3_BASE_PREFIX}/{group_name}".strip("/")
+    storage = S3Storage(
+        bucket_name=S3_BUCKET_NAME,
+        prefix=s3_prefix,
+        endpoint_url=S3_ENDPOINT_URL,
+        region_name=AWS_REGION,
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    )
+    storage.sync_existing()
+
+    print(f"\n{'='*75}")
+    print(f"========== BẮT ĐẦU SINH ẢNH NHIỄU TOÁN HỌC (TRUE NOISE): {group_name} ==========")
+    print(f"Mục tiêu: {target_images} ảnh BMP ({width}x{height}) | S3: s3://{S3_BUCKET_NAME}/{s3_prefix}/")
+    print(f"Chế độ ghi đè (Overwrite): {overwrite}")
+    print(f"{'='*75}")
+
+    created = 0
+    for i in range(1, target_images + 1):
+        filename = f"{i:06d}.bmp"
+        if not overwrite and storage.exists(filename):
+            print(f"[BỎ QUA] Đã tồn tại: {filename}")
+            continue
+
+        # 1. Sinh ma trận điểm ảnh ngẫu nhiên tuyệt đối U(0, 255) cho RGB
+        noise_array = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
+
+        # 2. Chuyển thành ảnh BMP trong bộ nhớ RAM
+        img = Image.fromarray(noise_array, "RGB")
+        bmp_buffer = BytesIO()
+        img.save(bmp_buffer, format="BMP")
+        bmp_data = bmp_buffer.getvalue()
+
+        # 3. Đẩy trực tiếp lên S3
+        storage.write(filename, bmp_data)
+        created += 1
+        if created % 10 == 0 or created == target_images:
+            print(f"-> Đã sinh & đẩy lên S3: [{created}/{target_images}] ảnh nhiễu chuẩn ({filename})")
+
+    print(f"\n{'='*75}")
+    print(f"========== HOÀN TẤT SINH {created} ẢNH NHIỄU TOÁN HỌC LÊN S3 ==========")
+    print(f"{'='*75}\n")
+
+
 # ==============================================================================
 # 6. BỘ TỪ KHÓA PHONG PHÚ CHO 4 NHÓM
 # ==============================================================================
@@ -274,7 +336,18 @@ DATASET_PLAN = {
 
     # NHÓM 3: Vân bề mặt, chất liệu, nhiễu tần số cao (Textures & Noisy Patterns)
     "3_Textures_Noisy": [
-        "seamless stone wall texture", "animal fur texture macro", "sand dune texture surface",
+        # --- Cực kỳ nhiễu (High Entropy / Sensor & Synthetic Noise) ---
+        "tv static white noise background", "analog television static snow noise",
+        "gaussian noise pattern visual", "salt and pepper noise texture",
+        "high iso camera noise texture", "extreme high iso noise grain",
+        "film grain texture overlay 35mm", "heavy 35mm film grain texture",
+        "random white noise texture background", "chrominance color noise digital sensor",
+        "vhs tape glitch noise grain", "speckle noise pattern texture",
+        "crt monitor pixel noise texture", "uniform digital noise pattern",
+        # --- Vân hạt vi mô và chất liệu thô ráp tự nhiên (High-frequency Textures) ---
+        "coarse abrasive sandpaper texture", "natural sea salt crystals texture",
+        "crumpled aluminum foil metallic texture", "seamless stone wall texture",
+        "animal fur texture macro", "sand dune texture surface",
         "rough concrete texture wall", "fabric wool texture close up", "wood grain texture natural",
         "rusty metal texture oxidized", "brick wall texture seamless", "marble stone texture slab",
         "gravel ground texture pebbles", "asphalt pavement road texture", "weathered rustic wood plank texture",
@@ -357,13 +430,35 @@ if __name__ == '__main__':
     print(f"Trạng thái: KHÔNG LƯU BẤT KỲ FILE NÀO TRÊN Ổ CỨNG MÁY CHỦ")
     print(f"{'='*75}")
 
+    import argparse
+    parser = argparse.ArgumentParser(description="Crawl ảnh hoặc sinh ảnh nhiễu chuẩn đẩy lên S3.")
+    parser.add_argument("--noise-only", action="store_true", help="Chỉ sinh 100 ảnh nhiễu toán học chuẩn cho nhóm 3_Textures_Noisy.")
+    parser.add_argument("--no-overwrite", action="store_true", help="Không ghi đè nếu ảnh đã tồn tại trên S3.")
+    cli_args, _ = parser.parse_known_args()
+
+    if cli_args.noise_only:
+        generate_true_noise_to_s3(
+            group_name="3_Textures_Noisy",
+            target_images=TARGET_IMAGES_PER_GROUP,
+            overwrite=not cli_args.no_overwrite
+        )
+        print("\n[CHÚC MỪNG] ĐÃ HOÀN TẤT SINH ẢNH NHIỄU TOÁN HỌC CHO NHÓM 3 LÊN S3!")
+        sys.exit(0)
+
     # Chạy lần lượt từng nhóm
     for group_name, kw_list in DATASET_PLAN.items():
-        crawl_images_for_group_s3(
-            group_name=group_name,
-            keywords=kw_list,
-            target_images=TARGET_IMAGES_PER_GROUP
-        )
+        if group_name == "3_Textures_Noisy":
+            generate_true_noise_to_s3(
+                group_name=group_name,
+                target_images=TARGET_IMAGES_PER_GROUP,
+                overwrite=not cli_args.no_overwrite
+            )
+        else:
+            crawl_images_for_group_s3(
+                group_name=group_name,
+                keywords=kw_list,
+                target_images=TARGET_IMAGES_PER_GROUP
+            )
         print("Nghỉ 5 giây trước khi chuyển sang nhóm tiếp theo...")
         time.sleep(5)
 

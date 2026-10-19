@@ -24,7 +24,9 @@ from algorithms import (
     load_image,
     raw_bytes_to_image,
     save_image,
-    calculate_image_metrics
+    calculate_image_metrics,
+    calculate_entropy,
+    calculate_residual_entropy,
 )
 
 # Load environment variables from .env if present
@@ -164,9 +166,11 @@ def _process_single_image(
     orig_size = len(raw_bytes)
     del raw_bytes
 
-    # Tính pixel std dev — proxy cho entropy Shannon (nhiễu càng cao → std càng lớn → CR càng thấp)
-    arr_rgb = np.array(img, dtype=np.float32)
-    pixel_std = float(arr_rgb.std())
+    # Đo lường Shannon Entropy gốc (Zero-order) và Residual Entropy (sau bộ lọc Sub Predictor)
+    arr_rgb_u8 = np.array(img, dtype=np.uint8)
+    entropy_val = calculate_entropy(arr_rgb_u8)
+    residual_entropy_val = calculate_residual_entropy(arr_rgb_u8)
+    pixel_std = float(arr_rgb_u8.astype(np.float32).std())
 
     # Trích tên nhóm ảnh từ fname (vd: "1_Natural_Complex__000001.bmp" → "1_Natural_Complex")
     image_group = fname.split("__")[0] if "__" in fname else "unknown"
@@ -209,6 +213,8 @@ def _process_single_image(
         "avg_compress_time_sec": round(avg_comp, 4),
         "min_compress_time_sec": round(min_comp, 4),
         "compress_speed_mb_s": round(comp_speed, 2),
+        "entropy": round(entropy_val, 4),
+        "residual_entropy": round(residual_entropy_val, 4),
         "pixel_std": round(pixel_std, 4),
     }
 
@@ -296,7 +302,6 @@ def _write_report_json(
 
 def run_multi_codec_benchmark_pipeline(
     codecs: Mapping[str, Tuple[Callable, Callable, str]],
-    run_id: int = 1,
     num_runs: int = 1,
     limit_files: int = 10,
     max_workers: int = 1,
@@ -316,7 +321,7 @@ def run_multi_codec_benchmark_pipeline(
     state: Dict[str, Dict[str, Any]] = {}
 
     for algo_name in codecs:
-        compress_root = os.path.join(base_output_dir, algo_name, str(run_id), "compress")
+        compress_root = os.path.join(base_output_dir, algo_name, "compress")
         compress_dir = os.path.join(compress_root, "files")
         images_out_dir = os.path.join(compress_root, "images")
         report_dir = os.path.join(compress_root, "report")
@@ -333,7 +338,7 @@ def run_multi_codec_benchmark_pipeline(
 
     print(f"\n{'=' * 80}")
     print("MULTI-CODEC BENCHMARK: ONE S3 IMAGE -> ALL CODECS")
-    print(f"Run: {run_id} | Images per group: {limit_files} | Timing repeats: {num_runs}")
+    print(f"Images per group: {limit_files} | Timing repeats per image: {num_runs}")
     print(f"Codec order: {' -> '.join(codecs)}")
     if max_workers != 1:
         print("Note: codecs run sequentially; --workers is ignored for fair timing.")
@@ -388,7 +393,7 @@ def run_multi_codec_benchmark_pipeline(
             gc.collect()
 
     print(f"\n{'=' * 80}")
-    print(f"MULTI-CODEC RUN {run_id} COMPLETE: {total_images} S3 images fetched once each")
+    print(f"MULTI-CODEC BENCHMARK COMPLETE: {total_images} S3 images fetched once each")
     for algo_name, algo_state in state.items():
         comp_reports = algo_state["compression"]
         decomp_reports = algo_state["decompression"]
@@ -426,10 +431,9 @@ def run_s3_benchmark_pipeline(
     decompress_fn: Optional[Callable[[bytes], Image.Image]] = None,
     algo_name: str = "deflate",
     file_extension: str = ".defimg",
-    run_id: int = 1,
     num_runs: int = 1,
     limit_files: int = 10,
-    max_workers: int = 10   # Giữ tham số để tương thích API cũ, không dùng parallel nữa
+    max_workers: int = 1,
 ):
     """
     Pipeline benchmark end-to-end, xử lý TỪNG ẢNH MỘT để tiết kiệm RAM tối đa:
@@ -455,16 +459,16 @@ def run_s3_benchmark_pipeline(
 
     # Chuẩn bị thư mục output
     base_output_dir = "output_not_commit"
-    compress_dir = os.path.join(base_output_dir, algo_name, str(run_id), "compress", "files")
-    images_out_dir = os.path.join(base_output_dir, algo_name, str(run_id), "compress", "images")
-    report_dir = os.path.join(base_output_dir, algo_name, str(run_id), "compress", "report")
+    compress_dir = os.path.join(base_output_dir, algo_name, "compress", "files")
+    images_out_dir = os.path.join(base_output_dir, algo_name, "compress", "images")
+    report_dir = os.path.join(base_output_dir, algo_name, "compress", "report")
     os.makedirs(compress_dir, exist_ok=True)
     os.makedirs(images_out_dir, exist_ok=True)
     os.makedirs(report_dir, exist_ok=True)
 
     print(f"\n{'='*80}")
     print(f"========== BẮT ĐẦU BENCHMARK (STREAMING - TỪNG ẢNH MỘT) ==========")
-    print(f"Thuật toán: {algo_name} | Lần chạy #: {run_id} | Giới hạn: {limit_files} ảnh | Lặp: {num_runs} lần")
+    print(f"Thuật toán: {algo_name} | Giới hạn: {limit_files} ảnh/nhóm | Lặp: {num_runs} lần/ảnh")
     print(f"Lưu file nén:     {compress_dir}")
     print(f"Lưu ảnh giải nén: {images_out_dir}")
     print(f"Lưu report:       {report_dir}")
@@ -557,7 +561,6 @@ def run_s3_benchmark_pipeline(
 if __name__ == '__main__':
     run_s3_benchmark_pipeline(
         algo_name="deflate",
-        run_id=1,
         num_runs=1,
         limit_files=10,
     )
